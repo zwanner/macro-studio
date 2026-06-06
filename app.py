@@ -610,7 +610,14 @@ class MacroStudio(tk.Tk):
         canvas_shell = ttk.Frame(self, style="Panel.TFrame")
         canvas_shell.grid(row=2, column=1, sticky="nsew", padx=(8, 8), pady=(0, 8))
         canvas_shell.columnconfigure(0, weight=1)
-        canvas_shell.rowconfigure(0, weight=1)
+        canvas_shell.rowconfigure(1, weight=1)
+        self.graph_info = tk.StringVar(value="")
+        ttk.Label(
+            canvas_shell,
+            textvariable=self.graph_info,
+            style="Muted.TLabel",
+            padding=(10, 7),
+        ).grid(row=0, column=0, columnspan=2, sticky="ew")
         self.canvas = tk.Canvas(
             canvas_shell,
             bg=THEME["canvas"],
@@ -619,12 +626,12 @@ class MacroStudio(tk.Tk):
             xscrollincrement=16,
             yscrollincrement=16,
         )
-        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.canvas.grid(row=1, column=0, sticky="nsew")
         self.canvas_vbar = ttk.Scrollbar(canvas_shell, orient="vertical", command=self.canvas.yview)
         self.canvas_hbar = ttk.Scrollbar(canvas_shell, orient="horizontal", command=self.canvas.xview)
         self.canvas.configure(xscrollcommand=self.canvas_hbar.set, yscrollcommand=self.canvas_vbar.set)
-        self.canvas_vbar.grid(row=0, column=1, sticky="ns")
-        self.canvas_hbar.grid(row=1, column=0, sticky="ew")
+        self.canvas_vbar.grid(row=1, column=1, sticky="ns")
+        self.canvas_hbar.grid(row=2, column=0, sticky="ew")
         self.canvas.bind("<ButtonPress-1>", self.on_canvas_press)
         self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_canvas_release)
@@ -719,6 +726,11 @@ class MacroStudio(tk.Tk):
             self.tabs.tab(current, text=self.doc.tab_title)
         if hasattr(self, "script_status"):
             self.script_status.set("Unsaved changes" if self.doc.dirty else "Saved")
+        if hasattr(self, "graph_info"):
+            self.graph_info.set(
+                f"{clean_tab_title(self.doc.tab_title)}  |  {len(self.nodes)} nodes  |  "
+                f"Zoom {int(self.zoom * 100)}%  |  Record {display_hotkey(self.settings['record_hotkey'])}"
+            )
 
     def on_tab_click(self, event):
         try:
@@ -833,15 +845,6 @@ class MacroStudio(tk.Tk):
         self.canvas.delete("all")
         self.node_items.clear()
         self.update_canvas_scrollregion()
-        self.draw_canvas_grid()
-        self.canvas.create_text(
-            self.canvas.canvasx(26),
-            self.canvas.canvasy(26),
-            text=f"{clean_tab_title(self.doc.tab_title)}  |  {len(self.nodes)} nodes  |  Zoom {int(self.zoom * 100)}%  |  Record {display_hotkey(self.settings['record_hotkey'])}",
-            fill=THEME["muted"],
-            anchor="w",
-            font=(UI_FONT, 10),
-        )
         ordered = sorted(self.nodes, key=lambda n: n.y)
         for i, node in enumerate(ordered[:-1]):
             nxt = ordered[i + 1]
@@ -889,20 +892,6 @@ class MacroStudio(tk.Tk):
         if height <= 1:
             height = 620
         return width, height
-
-    def draw_canvas_grid(self):
-        viewport_w, viewport_h = self.canvas_viewport_size()
-        left = self.canvas.canvasx(0)
-        top = self.canvas.canvasy(0)
-        right = self.canvas.canvasx(viewport_w)
-        bottom = self.canvas.canvasy(viewport_h)
-        step = max(12, int(32 * self.zoom))
-        start_x = int(left // step) * step
-        start_y = int(top // step) * step
-        for x in range(start_x, int(right) + step, step):
-            self.canvas.create_line(x, top, x, bottom, fill="#121a20")
-        for y in range(start_y, int(bottom) + step, step):
-            self.canvas.create_line(left, y, right, y, fill="#121a20")
 
     def draw_node(self, node):
         x = self.to_screen(node.x)
