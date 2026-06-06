@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Macro Studio icon</title>
+  <desc id="desc">A clean Macro Studio logo showing a connected green macro flow.</desc>
+  <defs>
+    <linearGradient id="tile" x1="28" y1="24" x2="226" y2="232" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#24343d"/>
+      <stop offset="1" stop-color="#080d12"/>
+    </linearGradient>
+    <linearGradient id="flow" x1="62" y1="80" x2="196" y2="174" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7ee7b5"/>
+      <stop offset="1" stop-color="#42d392"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="24" y="24" width="208" height="208" rx="46" fill="url(#tile)"/>
+  <rect x="24" y="24" width="208" height="208" rx="46" fill="none" stroke="#344955" stroke-width="4"/>
+
+  <path
+    d="M74 168V92c0-10 8-18 18-18h5c8 0 15 5 18 12l13 31 13-31c3-7 10-12 18-12h5c10 0 18 8 18 18v76"
+    fill="none"
+    stroke="url(#flow)"
+    stroke-width="18"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+
+  <circle cx="74" cy="168" r="18" fill="#42d392"/>
+  <circle cx="128" cy="117" r="18" fill="#edf4f7"/>
+  <circle cx="182" cy="168" r="18" fill="#42d392"/>
+
+  <circle cx="74" cy="168" r="7" fill="#06130d"/>
+  <circle cx="128" cy="117" r="7" fill="#06130d"/>
+  <circle cx="182" cy="168" r="7" fill="#06130d"/>
+</svg>
