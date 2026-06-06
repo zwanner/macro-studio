@@ -23,6 +23,8 @@ CONFIG_PATH = Path.home() / ".macro_studio.json"
 UI_FONT = "Segoe UI Variable"
 ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 APP_ICON_PNG = ASSETS_DIR / "macro-studio-logo.png"
+WORKSPACE_MIN_W = 2200
+WORKSPACE_MIN_H = 1800
 
 DEFAULT_SETTINGS = {
     "record_hotkey": "<ctrl>+<shift>+r",
@@ -786,9 +788,23 @@ class MacroStudio(tk.Tk):
         self.set_zoom(self.zoom / 1.15)
 
     def set_zoom(self, value):
+        left_world = self.from_screen(self.canvas.canvasx(0)) if hasattr(self, "canvas") else 0
+        top_world = self.from_screen(self.canvas.canvasy(0)) if hasattr(self, "canvas") else 0
         self.zoom = min(max(value, 0.35), 2.0)
         self.status.set(f"Editor zoom {int(self.zoom * 100)}%")
+        self.update_canvas_scrollregion()
+        self.restore_canvas_view(left_world, top_world)
         self.refresh()
+
+    def restore_canvas_view(self, left_world, top_world):
+        region = self.canvas.cget("scrollregion").split()
+        if len(region) != 4:
+            return
+        x1, y1, x2, y2 = [float(value) for value in region]
+        width = max(x2 - x1, 1)
+        height = max(y2 - y1, 1)
+        self.canvas.xview_moveto(min(max(self.to_screen(left_world) / width, 0), 1))
+        self.canvas.yview_moveto(min(max(self.to_screen(top_world) / height, 0), 1))
 
     def on_zoom_wheel(self, event):
         if event.delta > 0:
@@ -816,6 +832,7 @@ class MacroStudio(tk.Tk):
             return
         self.canvas.delete("all")
         self.node_items.clear()
+        self.update_canvas_scrollregion()
         self.draw_canvas_grid()
         self.canvas.create_text(
             self.canvas.canvasx(26),
@@ -847,26 +864,45 @@ class MacroStudio(tk.Tk):
             )
         for node in ordered:
             self.draw_node(node)
-        self.update_canvas_scrollregion()
         self.update_inspector()
         self.update_current_tab_title()
 
     def update_canvas_scrollregion(self):
-        bbox = self.canvas.bbox("all")
-        if not bbox:
-            self.canvas.configure(scrollregion=(0, 0, 1200, 800))
+        viewport_w, viewport_h = self.canvas_viewport_size()
+        if not self.nodes:
+            self.canvas.configure(scrollregion=(0, 0, viewport_w, viewport_h))
             return
-        pad = 180
-        self.canvas.configure(scrollregion=(bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad))
+        max_x = WORKSPACE_MIN_W
+        max_y = WORKSPACE_MIN_H
+        for node in self.nodes:
+            max_x = max(max_x, node.x + NODE_W + 300)
+            max_y = max(max_y, node.y + NODE_H + 300)
+        width = max(self.to_screen(max_x), viewport_w)
+        height = max(self.to_screen(max_y), viewport_h)
+        self.canvas.configure(scrollregion=(0, 0, width, height))
+
+    def canvas_viewport_size(self):
+        width = self.canvas.winfo_width()
+        height = self.canvas.winfo_height()
+        if width <= 1:
+            width = 1000
+        if height <= 1:
+            height = 620
+        return width, height
 
     def draw_canvas_grid(self):
-        width = max(self.canvas.winfo_width(), 1000)
-        height = max(self.canvas.winfo_height(), 620)
+        viewport_w, viewport_h = self.canvas_viewport_size()
+        left = self.canvas.canvasx(0)
+        top = self.canvas.canvasy(0)
+        right = self.canvas.canvasx(viewport_w)
+        bottom = self.canvas.canvasy(viewport_h)
         step = max(12, int(32 * self.zoom))
-        for x in range(0, width, step):
-            self.canvas.create_line(x, 0, x, height, fill="#121a20")
-        for y in range(0, height, step):
-            self.canvas.create_line(0, y, width, y, fill="#121a20")
+        start_x = int(left // step) * step
+        start_y = int(top // step) * step
+        for x in range(start_x, int(right) + step, step):
+            self.canvas.create_line(x, top, x, bottom, fill="#121a20")
+        for y in range(start_y, int(bottom) + step, step):
+            self.canvas.create_line(left, y, right, y, fill="#121a20")
 
     def draw_node(self, node):
         x = self.to_screen(node.x)
