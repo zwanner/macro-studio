@@ -4,6 +4,7 @@ import json
 import subprocess
 import time
 import tkinter as tk
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -325,12 +326,24 @@ def colorref(hex_color):
     return red | (green << 8) | (blue << 16)
 
 
+def get_active_window_title():
+    try:
+        hwnd = ctypes.windll.user32.GetForegroundWindow()
+        length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        ctypes.windll.user32.GetWindowTextW(hwnd, buffer, length + 1)
+        return buffer.value
+    except Exception:
+        return ""
+
+
 @dataclass
 class MacroNode:
     node_type: str
     x: int
     y: int
     data: dict = field(default_factory=dict)
+    node_id: str = field(default_factory=lambda: uuid.uuid4().hex[:10])
 
     @property
     def title(self):
@@ -342,6 +355,7 @@ class MacroDocument:
     name: str = "Untitled"
     file_path: Path | None = None
     nodes: list[MacroNode] = field(default_factory=list)
+    edges: list[dict] = field(default_factory=list)
     selected: MacroNode | None = None
     dirty: bool = False
 
@@ -353,9 +367,13 @@ class MacroDocument:
 
 
 NODE_TYPES = {
+    "start": {"title": "Start", "defaults": {}, "description": "Workflow entry point. Playback starts here when the script has graph connections."},
+    "end": {"title": "End", "defaults": {}, "description": "Workflow stop point. Playback stops this path when it reaches this node."},
     "loop": {"title": "Loop Script", "defaults": {"count": 3}, "description": "Repeats the active script a fixed number of times. The loop node itself is skipped during playback and acts as a script-level repeat setting."},
     "counter": {"title": "Counter", "defaults": {"name": "counter", "start": 1, "step": 1}, "description": "Tracks a named number while playback runs. Use placeholders like {counter} in Type Text, Set Clipboard, or Paste data values."},
     "delay": {"title": "Delay", "defaults": {"seconds": 0.5}, "description": "Pauses playback for a number of seconds. Useful between clicks, launches, and pages that need time to load."},
+    "wait_window": {"title": "Wait Window", "defaults": {"title_contains": "", "timeout": 10}, "description": "Waits until the active window title contains specific text, or until the timeout expires."},
+    "note": {"title": "Note", "defaults": {"text": "Describe this part of the workflow"}, "description": "A documentation node. It is ignored during playback and helps explain larger workflows."},
     "click": {"title": "Mouse Click", "defaults": {"button": "left", "x": 500, "y": 500}, "description": "Moves the mouse to a screen coordinate and clicks a button. Coordinates are absolute screen pixels."},
     "move": {"title": "Mouse Move", "defaults": {"x": 500, "y": 500}, "description": "Moves the mouse pointer to a screen coordinate without clicking."},
     "scroll": {"title": "Scroll", "defaults": {"direction": "down", "amount": 3}, "description": "Scrolls the mouse wheel up or down by a chosen amount. The mouse stays wherever it currently is."},
@@ -377,6 +395,8 @@ FIELD_DESCRIPTIONS = {
     "start": "Initial counter value before the first step is applied.",
     "step": "How much the counter changes each time this node runs.",
     "seconds": "Pause duration in seconds. Decimals are allowed.",
+    "title_contains": "Window-title text to wait for. Matching is case-insensitive.",
+    "timeout": "Maximum seconds to wait before continuing.",
     "button": "Mouse button to click.",
     "x": "Absolute screen X coordinate in pixels.",
     "y": "Absolute screen Y coordinate in pixels.",
@@ -417,6 +437,7 @@ class MacroStudio(tk.Tk):
         self.node_items = {}
         self.inspector_vars = {}
         self.suppress_dirty = False
+        self.pending_connection_source = None
         self.drag = None
         self.drag_moved = False
         self.zoom = 1.0
@@ -468,6 +489,31 @@ class MacroStudio(tk.Tk):
     @file_path.setter
     def file_path(self, value):
         self.doc.file_path = value
+
+    def node_by_id(self, node_id):
+        return next((node for node in self.nodes if node.node_id == node_id), None)
+
+    def outgoing_edges(self, node):
+        return [edge for edge in self.doc.edges if edge.get("from") == node.node_id]
+
+    def incoming_edges(self, node):
+        return [edge for edge in self.doc.edges if edge.get("to") == node.node_id]
+
+    def add_edge(self, source, target):
+        if not source or not target or source == target:
+            return False
+        edge = {"from": source.node_id, "to": target.node_id}
+        if edge in self.doc.edges:
+            return False
+        self.doc.edges.append(edge)
+        self.mark_dirty()
+        self.refresh()
+        return True
+
+    def remove_edges_for_node(self, node):
+        before = len(self.doc.edges)
+        self.doc.edges = [edge for edge in self.doc.edges if edge.get("from") != node.node_id and edge.get("to") != node.node_id]
+        return len(self.doc.edges) != before
 
     def _style_ui(self):
         style = ttk.Style(self)
@@ -646,6 +692,10 @@ class MacroStudio(tk.Tk):
         self.inspector_body = ttk.Frame(props, style="Panel.TFrame")
         self.inspector_body.pack(fill="both", expand=True, pady=4)
         for text, command, danger in [
+            ("Connect From", self.begin_connection_from_selected, False),
+            ("Connect To", self.connect_pending_to_selected, False),
+            ("Unlink Node", self.unlink_selected, False),
+            ("Auto Link", self.auto_link_nodes, False),
             ("Duplicate", self.duplicate_selected, False),
             ("Delete Node", self.delete_selected, True),
             ("Move Up", lambda: self.move_selected(-1), False),
@@ -846,29 +896,45 @@ class MacroStudio(tk.Tk):
         self.node_items.clear()
         self.update_canvas_scrollregion()
         ordered = sorted(self.nodes, key=lambda n: n.y)
-        for i, node in enumerate(ordered[:-1]):
-            nxt = ordered[i + 1]
-            color = THEME["line"]
-            width = 2
-            if nxt == self.selected:
-                color = THEME["danger"]
-                width = 3
-            elif node == self.selected:
-                color = THEME["accent"]
-                width = 3
-            self.canvas.create_line(
-                self.to_screen(node.x + NODE_W / 2),
-                self.to_screen(node.y + NODE_H),
-                self.to_screen(nxt.x + NODE_W / 2),
-                self.to_screen(nxt.y),
-                fill=color,
-                width=max(1, int(width * self.zoom)),
-                arrow=tk.LAST,
-            )
+        self.draw_edges()
         for node in ordered:
             self.draw_node(node)
         self.update_inspector()
         self.update_current_tab_title()
+
+    def draw_edges(self):
+        for edge in self.doc.edges:
+            source = self.node_by_id(edge.get("from"))
+            target = self.node_by_id(edge.get("to"))
+            if not source or not target:
+                continue
+            color = THEME["line"]
+            width = 2
+            if target == self.selected:
+                color = THEME["danger"]
+                width = 3
+            elif source == self.selected:
+                color = THEME["accent"]
+                width = 3
+            x1 = self.to_screen(source.x + NODE_W / 2)
+            y1 = self.to_screen(source.y + NODE_H)
+            x2 = self.to_screen(target.x + NODE_W / 2)
+            y2 = self.to_screen(target.y)
+            mid_y = y1 + max(28, (y2 - y1) / 2)
+            self.canvas.create_line(
+                x1,
+                y1,
+                x1,
+                mid_y,
+                x2,
+                mid_y,
+                x2,
+                y2,
+                fill=color,
+                width=max(1, int(width * self.zoom)),
+                arrow=tk.LAST,
+                smooth=True,
+            )
 
     def update_canvas_scrollregion(self):
         viewport_w, viewport_h = self.canvas_viewport_size()
@@ -979,6 +1045,11 @@ class MacroStudio(tk.Tk):
                 text=NODE_TYPES[self.selected.node_type].get("description", ""),
                 style="Muted.TLabel",
                 wraplength=250,
+            ).pack(anchor="w", pady=(0, 10))
+            ttk.Label(
+                self.inspector_body,
+                text=f"Incoming: {len(self.incoming_edges(self.selected))}  |  Outgoing: {len(self.outgoing_edges(self.selected))}",
+                style="Muted.TLabel",
             ).pack(anchor="w", pady=(0, 10))
             name_row = ttk.Frame(self.inspector_body, style="Panel.TFrame")
             name_row.pack(fill="x", pady=(0, 8))
@@ -1103,8 +1174,41 @@ class MacroStudio(tk.Tk):
         if self.selected:
             self.add_node(self.selected.node_type, self.selected.x + 28, self.selected.y + 88, dict(self.selected.data))
 
+    def begin_connection_from_selected(self):
+        if not self.selected:
+            return
+        self.pending_connection_source = self.selected.node_id
+        self.status.set(f"Connection source: {self.selected.title}")
+
+    def connect_pending_to_selected(self):
+        if not self.selected or not self.pending_connection_source:
+            return
+        source = self.node_by_id(self.pending_connection_source)
+        if self.add_edge(source, self.selected):
+            self.status.set(f"Connected {source.title} -> {self.selected.title}")
+        self.pending_connection_source = None
+
+    def unlink_selected(self):
+        if not self.selected:
+            return
+        if self.remove_edges_for_node(self.selected):
+            self.mark_dirty()
+            self.refresh()
+            self.status.set(f"Removed links for {self.selected.title}")
+
+    def auto_link_nodes(self):
+        starts = [node for node in self.nodes if node.node_type == "start"]
+        ends = [node for node in self.nodes if node.node_type == "end"]
+        middle = [node for node in self.nodes if node.node_type not in ("start", "end")]
+        ordered = starts[:1] + sorted(middle, key=lambda n: (n.y, n.x)) + ends[:1]
+        self.doc.edges = [{"from": a.node_id, "to": b.node_id} for a, b in zip(ordered, ordered[1:])]
+        self.mark_dirty()
+        self.refresh()
+        self.status.set("Auto-linked nodes top-to-bottom")
+
     def delete_selected(self):
         if self.selected in self.nodes:
+            self.remove_edges_for_node(self.selected)
             self.nodes.remove(self.selected)
             self.selected = None
             self.mark_dirty()
@@ -1123,13 +1227,22 @@ class MacroStudio(tk.Tk):
     def clear_nodes(self):
         if messagebox.askyesno("Clear Script", "Remove all nodes from this script?"):
             self.nodes.clear()
+            self.doc.edges.clear()
             self.selected = None
             self.mark_dirty()
             self.refresh()
 
     def new_macro(self):
         self.untitled_counter += 1
-        self.add_document(MacroDocument(name=f"Untitled {self.untitled_counter}"))
+        start = MacroNode("start", 80, 80, {})
+        end = MacroNode("end", 80, 220, {})
+        self.add_document(
+            MacroDocument(
+                name=f"Untitled {self.untitled_counter}",
+                nodes=[start, end],
+                edges=[{"from": start.node_id, "to": end.node_id}],
+            )
+        )
         self.status.set("New script tab")
 
     def save_macro(self):
@@ -1142,11 +1255,25 @@ class MacroStudio(tk.Tk):
 
     def open_macro_file(self, path):
         payload = json.loads(path.read_text(encoding="utf-8"))
+        nodes = [
+            MacroNode(
+                item["type"],
+                item.get("x", 80),
+                item.get("y", 80),
+                item.get("data", {}),
+                item.get("id") or item.get("node_id") or uuid.uuid4().hex[:10],
+            )
+            for item in payload.get("nodes", [])
+        ]
         doc = MacroDocument(
             name=path.stem,
             file_path=path,
-            nodes=[MacroNode(item["type"], item.get("x", 80), item.get("y", 80), item.get("data", {})) for item in payload.get("nodes", [])],
+            nodes=nodes,
+            edges=payload.get("edges", []),
         )
+        if not doc.edges and len(doc.nodes) > 1:
+            ordered = sorted(doc.nodes, key=lambda n: (n.y, n.x))
+            doc.edges = [{"from": a.node_id, "to": b.node_id} for a, b in zip(ordered, ordered[1:])]
         doc.selected = doc.nodes[0] if doc.nodes else None
         self.add_document(doc)
         self.add_recent_file(path)
@@ -1155,7 +1282,8 @@ class MacroStudio(tk.Tk):
     def write_macro(self, doc, path):
         payload = {
             "version": MACRO_VERSION,
-            "nodes": [{"type": n.node_type, "x": n.x, "y": n.y, "data": n.data} for n in doc.nodes],
+            "nodes": [{"id": n.node_id, "type": n.node_type, "x": n.x, "y": n.y, "data": n.data} for n in doc.nodes],
+            "edges": doc.edges,
         }
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
@@ -1345,12 +1473,52 @@ class MacroStudio(tk.Tk):
         }
 
     def playback_nodes_and_count(self):
-        ordered = sorted(self.nodes, key=lambda n: n.y)
+        ordered = self.workflow_order()
+        if not ordered:
+            ordered = sorted(self.nodes, key=lambda n: (n.y, n.x))
         loop_nodes = [node for node in ordered if node.node_type == "loop"]
         count = 1
         if loop_nodes:
             count = max(1, safe_int(loop_nodes[0].data.get("count", 1), 1))
         return [node for node in ordered if node.node_type != "loop"], count
+
+    def workflow_order(self):
+        if not self.doc.edges:
+            return sorted(self.nodes, key=lambda n: (n.y, n.x))
+        starts = [node for node in self.nodes if node.node_type == "start"]
+        start = starts[0] if starts else min(self.nodes, key=lambda n: (n.y, n.x), default=None)
+        if not start:
+            return []
+        order = []
+        visited_edges = set()
+        active_nodes = set()
+
+        def visit(node):
+            if node.node_id in active_nodes:
+                return
+            active_nodes.add(node.node_id)
+            order.append(node)
+            if node.node_type == "end":
+                active_nodes.remove(node.node_id)
+                return
+            outgoing = sorted(
+                self.outgoing_edges(node),
+                key=lambda edge: (
+                    (self.node_by_id(edge.get("to")).y if self.node_by_id(edge.get("to")) else 0),
+                    (self.node_by_id(edge.get("to")).x if self.node_by_id(edge.get("to")) else 0),
+                ),
+            )
+            for edge in outgoing:
+                edge_key = (edge.get("from"), edge.get("to"))
+                target = self.node_by_id(edge.get("to"))
+                if not target or edge_key in visited_edges:
+                    continue
+                visited_edges.add(edge_key)
+                visit(target)
+            active_nodes.remove(node.node_id)
+
+        visit(start)
+        return order
 
     def _play_after_countdown(self, countdown):
         end_time = time.perf_counter() + countdown
@@ -1383,12 +1551,14 @@ class MacroStudio(tk.Tk):
     def execute_node(self, node):
         data = node.data
         kind = node.node_type
-        if kind == "loop":
+        if kind in ("start", "end", "loop", "note"):
             return
         if kind == "counter":
             self.execute_counter(data)
         elif kind == "delay":
             self.wait_interruptible(float(data.get("seconds", 0.5)))
+        elif kind == "wait_window":
+            self.wait_for_window_title(str(data.get("title_contains", "")), float(data.get("timeout", 10)))
         elif kind == "move":
             WindowsInput.move_mouse(int(data.get("x", 0)), int(data.get("y", 0)))
         elif kind == "click":
@@ -1420,6 +1590,19 @@ class MacroStudio(tk.Tk):
             subprocess.Popen(str(data.get("command", "")), shell=True)
         elif kind == "recorded":
             self.execute_recorded(data.get("event", {}))
+
+    def wait_for_window_title(self, text, timeout):
+        if not text:
+            self.wait_interruptible(timeout)
+            return
+        needle = text.lower()
+        end_time = time.perf_counter() + timeout
+        while self.playing and time.perf_counter() < end_time:
+            title = get_active_window_title().lower()
+            if needle in title:
+                return
+            self.update()
+            time.sleep(0.1)
 
     def execute_counter(self, data):
         if self.play_context is None:
