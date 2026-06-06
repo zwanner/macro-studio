@@ -49,4 +49,4 @@ When using loops, each pass advances to the next paste item. Text fields can inc
 
 ## Workflow Graph
 
-New scripts include **Start** and **End** nodes. Use **Connect From** on a selected source node, select another node, then use **Connect To** to create an execution edge. **Auto Link** rebuilds a simple Start-to-End flow using top-to-bottom node order.
+New scripts include **Start** and **End** nodes. Use **Connect From** on a selected source node, select another node, then use **Connect To** to create an execution edge. You can also drag from a node's bottom output dot to another node's top input dot. Adding a node while another node is selected automatically links the selected node to the new node. **Auto Link** rebuilds a simple Start-to-End flow using top-to-bottom node order.

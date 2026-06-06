@@ -435,9 +435,11 @@ class MacroStudio(tk.Tk):
         self.tab_to_doc = {}
         self.untitled_counter = 0
         self.node_items = {}
+        self.port_items = {}
         self.inspector_vars = {}
         self.suppress_dirty = False
         self.pending_connection_source = None
+        self.connection_drag = None
         self.drag = None
         self.drag_moved = False
         self.zoom = 1.0
@@ -499,15 +501,18 @@ class MacroStudio(tk.Tk):
     def incoming_edges(self, node):
         return [edge for edge in self.doc.edges if edge.get("to") == node.node_id]
 
-    def add_edge(self, source, target):
+    def add_edge(self, source, target, refresh=True):
         if not source or not target or source == target:
+            return False
+        if source.node_type == "end" or target.node_type == "start":
             return False
         edge = {"from": source.node_id, "to": target.node_id}
         if edge in self.doc.edges:
             return False
         self.doc.edges.append(edge)
         self.mark_dirty()
-        self.refresh()
+        if refresh:
+            self.refresh()
         return True
 
     def remove_edges_for_node(self, node):
@@ -880,11 +885,14 @@ class MacroStudio(tk.Tk):
         return "break"
 
     def add_node(self, node_type, x=None, y=None, data=None):
+        previous = self.selected
         defaults = dict(NODE_TYPES[node_type]["defaults"])
         if data:
             defaults.update(data)
         node = MacroNode(node_type, x or 80, y or 70 + len(self.nodes) * 88, defaults)
         self.nodes.append(node)
+        if previous and previous in self.nodes and previous != node:
+            self.add_edge(previous, node, refresh=False)
         self.selected = node
         self.mark_dirty()
         self.refresh()
@@ -894,6 +902,7 @@ class MacroStudio(tk.Tk):
             return
         self.canvas.delete("all")
         self.node_items.clear()
+        self.port_items.clear()
         self.update_canvas_scrollregion()
         ordered = sorted(self.nodes, key=lambda n: n.y)
         self.draw_edges()
@@ -970,6 +979,7 @@ class MacroStudio(tk.Tk):
         rounded_rect(self.canvas, x + self.to_screen(5), y + self.to_screen(6), x + w + self.to_screen(5), y + h + self.to_screen(6), radius, fill="#04070a", outline="")
         rect = rounded_rect(self.canvas, x, y, x + w, y + h, radius, fill=fill, outline=outline, width=max(1, int(2 * self.zoom)))
         rounded_rect(self.canvas, x, y, x + self.to_screen(8), y + h, radius, fill=THEME["accent"], outline=THEME["accent"])
+        self.draw_ports(node, x, y, w, h)
         title = self.canvas.create_text(x + self.to_screen(16), y + self.to_screen(12), text=node.title, fill=THEME["text"], anchor="nw", font=(UI_FONT, max(7, int(10 * self.zoom)), "bold"))
         detail = None
         if self.zoom >= 0.72:
@@ -978,6 +988,19 @@ class MacroStudio(tk.Tk):
         self.node_items[title] = node
         if detail:
             self.node_items[detail] = node
+
+    def draw_ports(self, node, x, y, w, h):
+        r = max(5, int(7 * self.zoom))
+        input_x = x + w / 2
+        input_y = y
+        output_x = x + w / 2
+        output_y = y + h
+        if node.node_type != "start":
+            item = self.canvas.create_oval(input_x - r, input_y - r, input_x + r, input_y + r, fill=THEME["panel_3"], outline=THEME["accent"], width=max(1, int(2 * self.zoom)))
+            self.port_items[item] = (node, "input")
+        if node.node_type != "end":
+            item = self.canvas.create_oval(output_x - r, output_y - r, output_x + r, output_y + r, fill=THEME["accent"], outline=THEME["text"], width=max(1, int(2 * self.zoom)))
+            self.port_items[item] = (node, "output")
 
     def node_summary(self, node):
         if node.node_type == "recorded":
@@ -1001,6 +1024,19 @@ class MacroStudio(tk.Tk):
     def on_canvas_press(self, event):
         canvas_x = self.canvas.canvasx(event.x)
         canvas_y = self.canvas.canvasy(event.y)
+        port = self.find_port_at(canvas_x, canvas_y, "output")
+        if port and port[1] == "output":
+            node = port[0]
+            self.selected = node
+            self.connection_drag = {
+                "source": node,
+                "line": None,
+                "start": (self.to_screen(node.x + NODE_W / 2), self.to_screen(node.y + NODE_H)),
+            }
+            self.drag = None
+            self.drag_moved = False
+            self.refresh()
+            return
         item = self.canvas.find_closest(canvas_x, canvas_y)
         node = self.node_items.get(item[0]) if item else None
         self.selected = node
@@ -1009,6 +1045,9 @@ class MacroStudio(tk.Tk):
         self.refresh()
 
     def on_canvas_drag(self, event):
+        if self.connection_drag:
+            self.update_connection_preview(event)
+            return
         if not self.drag:
             return
         node, dx, dy = self.drag
@@ -1021,13 +1060,55 @@ class MacroStudio(tk.Tk):
         node.y = new_y
         self.refresh()
 
-    def on_canvas_release(self, _event):
+    def on_canvas_release(self, event):
+        if self.connection_drag:
+            self.finish_connection_drag(event)
+            return
         self.drag = None
         self.nodes.sort(key=lambda n: n.y)
         if self.drag_moved:
             self.mark_dirty()
         self.drag_moved = False
         self.refresh()
+
+    def update_connection_preview(self, event):
+        if self.connection_drag.get("line"):
+            self.canvas.delete(self.connection_drag["line"])
+        start_x, start_y = self.connection_drag["start"]
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        self.connection_drag["line"] = self.canvas.create_line(
+            start_x,
+            start_y,
+            canvas_x,
+            canvas_y,
+            fill=THEME["accent"],
+            width=max(2, int(3 * self.zoom)),
+            arrow=tk.LAST,
+            dash=(6, 4),
+        )
+
+    def finish_connection_drag(self, event):
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        target_port = self.find_port_at(canvas_x, canvas_y, "input")
+        source = self.connection_drag["source"]
+        self.connection_drag = None
+        if target_port and target_port[1] == "input":
+            target = target_port[0]
+            if self.add_edge(source, target):
+                self.status.set(f"Connected {source.title} -> {target.title}")
+        else:
+            self.refresh()
+
+    def find_port_at(self, canvas_x, canvas_y, kind=None):
+        radius = max(8, int(12 * self.zoom))
+        items = self.canvas.find_overlapping(canvas_x - radius, canvas_y - radius, canvas_x + radius, canvas_y + radius)
+        for item in reversed(items):
+            port = self.port_items.get(item)
+            if port and (kind is None or port[1] == kind):
+                return port
+        return None
 
     def update_inspector(self):
         for child in self.inspector_body.winfo_children():
