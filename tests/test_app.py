@@ -69,6 +69,17 @@ class GraphTests(MacroStudioTestCase):
         self.studio.auto_link_nodes()
         self.assertEqual([node.node_type for node in self.studio.workflow_order()], ["start", "click", "delay", "end"])
 
+    def test_auto_organize_nodes_arranges_and_links_workflow(self):
+        self.studio.add_node("delay", x=520, y=420)
+        self.studio.add_node("click", x=80, y=260)
+        self.studio.doc.edges = []
+        self.studio.auto_organize_nodes()
+
+        ordered = self.studio.workflow_order()
+        self.assertEqual([node.node_type for node in ordered], ["start", "click", "delay", "end"])
+        self.assertEqual([node.x for node in ordered], [170, 170, 170, 170])
+        self.assertEqual([node.y for node in ordered], sorted(node.y for node in ordered))
+
     def test_playback_sets_and_clears_active_node(self):
         self.studio.selected = self.node("start")
         self.studio.add_node("delay", x=120, y=180)
@@ -93,7 +104,7 @@ class PersistenceTests(MacroStudioTestCase):
         self.studio.add_node("delay")
         self.studio.auto_link_nodes()
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "sample.macro.json"
+            path = Path(tmp) / "sample.macro"
             self.studio.write_macro(self.studio.doc, path)
             payload = json.loads(path.read_text(encoding="utf-8"))
             self.assertIn("id", payload["nodes"][0])
@@ -170,6 +181,9 @@ class DataAndUiTests(MacroStudioTestCase):
         self.assertIsNotNone(self.studio.header_logo_image)
         self.assertLessEqual(max(self.studio.header_logo_image.width(), self.studio.header_logo_image.height()), 60)
         self.assertGreaterEqual(min(self.studio.header_logo_image.width(), self.studio.header_logo_image.height()), 30)
+        if app.Image is not None:
+            self.assertIsNotNone(self.studio.app_icon_large)
+            self.assertEqual(max(self.studio.header_logo_image.width(), self.studio.header_logo_image.height()), 44)
 
     def test_app_uses_standard_menu_bar_instead_of_recent_toolbar_combo(self):
         buttons = [child for child in self.studio.menu_bar.winfo_children() if child.winfo_class() == "Menubutton"]
@@ -181,6 +195,21 @@ class DataAndUiTests(MacroStudioTestCase):
         self.assertTrue(hasattr(self.studio, "recent_menu"))
         self.assertFalse(hasattr(self.studio, "recent_combo"))
         self.assertTrue(buttons[0].bind("<Button-1>"))
+        view_button = next(button for button in buttons if button.cget("text") == "View")
+        view_menu = self.studio.nametowidget(view_button["menu"])
+        view_labels = [
+            view_menu.entrycget(index, "label")
+            for index in range(view_menu.index("end") + 1)
+            if view_menu.type(index) != "separator"
+        ]
+        self.assertIn("Auto Organize Nodes", view_labels)
+
+    def test_uses_new_logo_assets_and_macro_extension(self):
+        self.assertEqual(app.APP_ICON_CANDIDATES[0].name, "macro-logo-150.png")
+        self.assertTrue(app.APP_ICON_CANDIDATES[0].exists())
+        self.assertTrue((app.ASSETS_DIR / "macro-logo-300.png").exists())
+        self.assertTrue((app.ASSETS_DIR / "macro-logo.svg").exists())
+        self.assertEqual(app.MACRO_FILETYPES[0], ("Macro files", "*.macro"))
 
     def test_custom_menu_buttons_post_dropdowns(self):
         file_button = next(

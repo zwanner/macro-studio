@@ -2,6 +2,7 @@ import ctypes
 import csv
 import json
 import subprocess
+import sys
 import time
 import tkinter as tk
 import uuid
@@ -29,8 +30,19 @@ NODE_H = 72
 MACRO_VERSION = 2
 CONFIG_PATH = Path.home() / ".macro_studio.json"
 UI_FONT = "Segoe UI Variable"
-ASSETS_DIR = Path(__file__).resolve().parent / "assets"
-APP_ICON_PNG = ASSETS_DIR / "macro-studio-logo.png"
+APP_DIR = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+ASSETS_DIR = APP_DIR / "assets"
+APP_ICON_CANDIDATES = [
+    ASSETS_DIR / "macro-logo-150.png",
+    ASSETS_DIR / "macro-logo-300.png",
+    ASSETS_DIR / "macro-logo-75.png",
+    ASSETS_DIR / "macro-studio-logo.png",
+]
+MACRO_FILETYPES = [
+    ("Macro files", "*.macro"),
+    ("Legacy macro JSON", "*.macro.json"),
+    ("JSON", "*.json"),
+]
 WORKSPACE_MIN_W = 1400
 WORKSPACE_MIN_H = 1000
 
@@ -539,6 +551,7 @@ class MacroStudio(tk.Tk):
         super().__init__()
         self.title(APP_TITLE)
         self.app_icon = None
+        self.app_icon_large = None
         self.header_logo_image = None
         self.geometry("1260x800")
         self.minsize(1040, 660)
@@ -688,11 +701,12 @@ class MacroStudio(tk.Tk):
         style.map("Accent.TButton", background=[("active", THEME["accent"])])
         style.configure(
             "TNotebook",
-            background=THEME["bg"],
+            background=THEME["panel"],
             tabmargins=(0, 8, 0, 0),
             borderwidth=0,
-            lightcolor=THEME["bg"],
-            darkcolor=THEME["bg"],
+            bordercolor=THEME["panel"],
+            lightcolor=THEME["panel"],
+            darkcolor=THEME["panel"],
         )
         style.configure(
             "TNotebook.Tab",
@@ -732,14 +746,41 @@ class MacroStudio(tk.Tk):
         style.configure("TEntry", fieldbackground=THEME["panel_2"], foreground=THEME["text"], bordercolor=THEME["line"], padding=7)
 
     def load_app_icon(self):
-        if APP_ICON_PNG.exists():
+        icon_path = next((path for path in APP_ICON_CANDIDATES if path.exists()), None)
+        if icon_path:
             try:
-                self.app_icon = tk.PhotoImage(file=APP_ICON_PNG)
-                self.header_logo_image = self.prepare_header_logo(self.app_icon)
-                self.iconphoto(True, self.app_icon)
-            except tk.TclError:
+                if Image is not None:
+                    source = Image.open(icon_path).convert("RGBA")
+                    cropped = self.crop_pillow_transparent_padding(source)
+                    self.header_logo_image = ImageTk.PhotoImage(self.resize_pillow_logo(cropped, 44))
+                    self.app_icon = ImageTk.PhotoImage(self.resize_pillow_logo(cropped, 32))
+                    self.app_icon_large = ImageTk.PhotoImage(self.resize_pillow_logo(cropped, 64))
+                    self.iconphoto(True, self.app_icon, self.app_icon_large)
+                else:
+                    self.app_icon = tk.PhotoImage(file=icon_path)
+                    self.header_logo_image = self.prepare_header_logo(self.app_icon)
+                    self.iconphoto(True, self.app_icon)
+            except (OSError, tk.TclError):
                 self.app_icon = None
+                self.app_icon_large = None
                 self.header_logo_image = None
+
+    def crop_pillow_transparent_padding(self, image):
+        alpha = image.getchannel("A")
+        bbox = alpha.getbbox()
+        if not bbox:
+            return image
+        margin = 8
+        left = max(0, bbox[0] - margin)
+        top = max(0, bbox[1] - margin)
+        right = min(image.width, bbox[2] + margin)
+        bottom = min(image.height, bbox[3] + margin)
+        return image.crop((left, top, right, bottom))
+
+    def resize_pillow_logo(self, image, target):
+        scale = target / max(image.width, image.height)
+        size = (max(1, round(image.width * scale)), max(1, round(image.height * scale)))
+        return image.resize(size, Image.Resampling.LANCZOS)
 
     def prepare_header_logo(self, image):
         cropped = self.crop_transparent_padding(image)
@@ -910,6 +951,8 @@ class MacroStudio(tk.Tk):
         view_menu = self.create_styled_menu(menu_bar)
         view_menu.add_command(label="Zoom In", accelerator="Ctrl++", command=self.zoom_in)
         view_menu.add_command(label="Zoom Out", accelerator="Ctrl+-", command=self.zoom_out)
+        view_menu.add_separator()
+        view_menu.add_command(label="Auto Organize Nodes", command=self.auto_organize_nodes)
         self.add_menu_button(menu_bar, "View", view_menu)
 
         run_menu = self.create_styled_menu(menu_bar)
@@ -1155,7 +1198,7 @@ class MacroStudio(tk.Tk):
 
     def save_document(self, doc):
         if not doc.file_path:
-            path = filedialog.asksaveasfilename(defaultextension=".macro.json", filetypes=[("Macro files", "*.macro.json"), ("JSON", "*.json")])
+            path = filedialog.asksaveasfilename(defaultextension=".macro", filetypes=MACRO_FILETYPES)
             if not path:
                 return False
             doc.file_path = Path(path)
@@ -1732,6 +1775,27 @@ class MacroStudio(tk.Tk):
         self.refresh()
         self.status.set("Auto-linked nodes top-to-bottom")
 
+    def auto_organize_nodes(self):
+        if not self.nodes:
+            return
+        ordered = self.workflow_order() if self.doc.edges else []
+        if not ordered or len(ordered) != len(self.nodes) or any(node.node_type == "end" for node in ordered[:-1]):
+            starts = [node for node in self.nodes if node.node_type == "start"]
+            ends = [node for node in self.nodes if node.node_type == "end"]
+            middle = [node for node in self.nodes if node.node_type not in ("start", "end")]
+            ordered = starts[:1] + sorted(middle, key=lambda n: (n.y, n.x)) + ends[:1]
+        x = 170
+        y = 96
+        gap = 118
+        for index, node in enumerate(ordered):
+            node.x = x
+            node.y = y + index * gap
+        self.doc.edges = [{"from": a.node_id, "to": b.node_id} for a, b in zip(ordered, ordered[1:])]
+        self.selected = self.selected if self.selected in self.nodes else ordered[0]
+        self.mark_dirty()
+        self.refresh()
+        self.status.set("Auto-organized nodes")
+
     def delete_selected(self):
         if self.selected in self.nodes:
             self.remove_edges_for_node(self.selected)
@@ -1775,7 +1839,7 @@ class MacroStudio(tk.Tk):
         self.save_document(self.doc)
 
     def load_macro(self):
-        path = filedialog.askopenfilename(filetypes=[("Macro files", "*.macro.json"), ("JSON", "*.json")])
+        path = filedialog.askopenfilename(filetypes=MACRO_FILETYPES)
         if path:
             self.open_macro_file(Path(path))
 
