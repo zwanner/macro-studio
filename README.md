@@ -1,17 +1,18 @@
 # Macro Studio
 
+![Interface](assets/interface.png)
+
 Macro Studio is a Windows desktop macro builder with:
 
 - A full Tkinter GUI
-- A cleaner multi-panel editor with script tabs
+- A clean multi-panel editor with script tabs
 - Macro recording, saving, loading, and replay
-- A Scratch-like node canvas for building macros by dropping actions into a flow
+- A node canvas for building macros by dropping actions into a flow
 - Built-in nodes for delays, mouse actions, keyboard shortcuts, clipboard actions, text entry, app launching, and recorded events
 - App settings for record, play, and stop hotkeys
 - Recent scripts from the File menu
 - Loop and counter nodes for repeated workflows
 - Data-driven paste from clipboard, inline rows copied from Excel, or CSV/TSV files
-- Grouped recorded mouse movement paths instead of one node per tiny movement
 - Hover tooltips and inspector descriptions for node behavior and settings
 - Explicit graph connections with Start and End workflow nodes
 - Workflow helper controls for connecting, unlinking, auto-linking, and auto-organizing nodes
