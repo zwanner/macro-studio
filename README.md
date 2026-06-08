@@ -13,6 +13,8 @@ Macro Studio is a Windows desktop macro builder with:
 - Data-driven paste from clipboard, inline rows copied from Excel, or CSV/TSV files
 - Grouped recorded mouse movement paths instead of one node per tiny movement
 - Hover tooltips and inspector descriptions for node behavior and settings
+- Explicit graph connections with Start and End workflow nodes
+- Workflow helper controls for connecting, unlinking, and auto-linking nodes
 
 ## Setup
 
@@ -22,6 +24,12 @@ python app.py
 ```
 
 The app still opens without `pynput`, but global recording is disabled until the dependency is installed.
+
+## Tests
+
+```powershell
+python -m unittest discover -s tests -v
+```
 
 ## Default hotkeys
 
@@ -44,3 +52,7 @@ Use a **Paste** node with `source` set to:
 - `file` to paste one row at a time from a `.csv` or `.tsv` file path
 
 When using loops, each pass advances to the next paste item. Text fields can include placeholders like `{iteration}` or `{counter}`.
+
+## Workflow Graph
+
+New scripts include **Start** and **End** nodes. Use **Connect From** on a selected source node, select another node, then use **Connect To** to create an execution edge. You can also drag from a node's bottom output dot to another node's top input dot. Adding a node while another node is selected automatically links the selected node to the new node. **Auto Link** rebuilds a simple Start-to-End flow using top-to-bottom node order.
