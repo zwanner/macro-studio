@@ -25,6 +25,12 @@ python app.py
 
 The app still opens without `pynput`, but global recording is disabled until the dependency is installed.
 
+## Tests
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
 ## Default hotkeys
 
 - Record or stop recording: `Ctrl + Shift + R`
