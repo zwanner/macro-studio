@@ -1,6 +1,7 @@
 import ctypes
 import ctypes.wintypes
 import csv
+import ast
 import json
 import subprocess
 import sys
@@ -706,6 +707,8 @@ class MacroDocument:
     edges: list[dict] = field(default_factory=list)
     selected: MacroNode | None = None
     dirty: bool = False
+    undo_stack: list[dict] = field(default_factory=list)
+    redo_stack: list[dict] = field(default_factory=list)
 
     @property
     def tab_title(self):
@@ -717,7 +720,8 @@ class MacroDocument:
 NODE_TYPES = {
     "start": {"title": "Start", "defaults": {}, "description": "Workflow entry point. Playback starts here when the script has graph connections."},
     "end": {"title": "End", "defaults": {}, "description": "Workflow stop point. Playback stops this path when it reaches this node."},
-    "loop": {"title": "Loop Script", "defaults": {"mode": "count", "count": 3, "stop_hotkey": ""}, "description": "Repeats the active script a fixed number of times, or runs until a stop hotkey is pressed. The loop node itself is skipped during playback."},
+    "loop": {"title": "Loop Script", "defaults": {"mode": "count", "count": 3, "stop_hotkey": ""}, "description": "Repeats the entire script a fixed number of times, or runs until a stop hotkey is pressed. The loop node itself is skipped during playback."},
+    "loop_frame": {"title": "Loop Frame", "defaults": {"mode": "count", "count": 3, "stop_hotkey": "", "width": 360, "height": 300}, "description": "Loops only the nodes visually placed inside this frame. Frames can be nested for advanced workflows."},
     "global_delay": {"title": "Global Delay", "defaults": {"seconds": 0.1}, "description": "Adds a pause between every playback node in the script. This node acts as a script-level timing setting."},
     "counter": {"title": "Counter", "defaults": {"name": "counter", "start": 1, "step": 1}, "description": "Tracks a named number while playback runs. Use placeholders like {counter} in Type Text, Set Clipboard, or Paste data values."},
     "delay": {"title": "Delay", "defaults": {"seconds": 0.5}, "description": "Pauses playback for a number of seconds. Useful between clicks, launches, and pages that need time to load."},
@@ -731,7 +735,7 @@ NODE_TYPES = {
     "scroll": {"title": "Scroll", "defaults": {"direction": "down", "amount": 3}, "description": "Scrolls the mouse wheel up or down by a chosen amount. The mouse stays wherever it currently is."},
     "key": {"title": "Key Tap", "defaults": {"key": "enter"}, "description": "Presses and releases a single key such as enter, tab, esc, delete, or an arrow key."},
     "hotkey": {"title": "Hotkey", "defaults": {"keys": "ctrl+c", "custom_keys": ""}, "description": "Presses a key combination. Choose a common hotkey or set keys to custom and enter your own combo in custom_keys."},
-    "type": {"title": "Type Text", "defaults": {"text": "Hello"}, "description": "Types text using keyboard events. Supports placeholders like {iteration}, {loop_count}, and named counters."},
+    "type": {"title": "Type Text", "defaults": {"text": "Hello"}, "description": "Types text using keyboard events. Supports placeholders like {iteration}, {loop_index}, {loop_count}, and named counters."},
     "copy": {"title": "Copy", "defaults": {}, "description": "Runs Ctrl+C in the focused app."},
     "cut": {"title": "Cut", "defaults": {}, "description": "Runs Ctrl+X in the focused app."},
     "paste": {"title": "Paste", "defaults": {"source": "clipboard", "data": "", "file_path": "", "column": 1}, "description": "Pastes from the current clipboard, inline rows, or a CSV/TSV file. Data sources advance one item per paste, which pairs well with Loop Script."},
@@ -746,6 +750,8 @@ FIELD_DESCRIPTIONS = {
     "count": "How many times to run the active script. Minimum is 1.",
     "mode": "Loop behavior. Use count for fixed repeats or until hotkey for unknown repetition counts.",
     "stop_hotkey": "Optional hotkey that stops an until-hotkey loop. Leave blank to use the app Stop hotkey from Settings.",
+    "width": "Frame width in graph units.",
+    "height": "Frame height in graph units.",
     "name": "Counter name. Use the same name in placeholders, for example {counter}.",
     "start": "Initial counter value before the first step is applied.",
     "step": "How much the counter changes each time this node runs.",
@@ -754,14 +760,14 @@ FIELD_DESCRIPTIONS = {
     "timeout": "Maximum seconds to wait before continuing.",
     "hotkey": "Hotkey to wait for, using pynput syntax such as <ctrl>+<shift>+space.",
     "button": "Mouse button to click.",
-    "x": "Absolute screen X coordinate in pixels.",
-    "y": "Absolute screen Y coordinate in pixels.",
+    "x": "Absolute screen X coordinate in pixels. Supports placeholders and simple math, such as {first_click_x}+20.",
+    "y": "Absolute screen Y coordinate in pixels. Supports placeholders and simple math, such as {first_click_y}-10.",
     "direction": "Scroll wheel direction.",
     "amount": "Scroll strength. Larger numbers scroll farther.",
     "key": "Single key to press and release.",
     "keys": "Hotkey combination separated by plus signs, such as ctrl+c or ctrl+shift+s.",
     "custom_keys": "Custom hotkey combination used when keys is set to custom, such as ctrl+shift+a.",
-    "text": "Text value. Supports placeholders like {iteration}, {loop_count}, and named counters.",
+    "text": "Text value. Supports placeholders like {iteration}, {loop_index}, {loop_count}, and named counters.",
     "variable": "Variable base name. Values are available later as placeholders, such as {first_click_x}, {first_click_y}, or {clipboard}.",
     "target": "Where to save clipboard text: a variable, a playback dataset, or a file.",
     "dataset": "Dataset name used for collected values. Appended items are available as {dataset}, {dataset_count}, and {dataset_last}.",
@@ -777,6 +783,7 @@ FIELD_DESCRIPTIONS = {
 
 FIELD_OPTIONS = {
     ("loop", "mode"): ["count", "until hotkey"],
+    ("loop_frame", "mode"): ["count", "until hotkey"],
     ("click", "button"): ["left", "right", "middle"],
     ("wait_click", "button"): ["any", "left", "right", "middle"],
     ("wait_click", "save_position"): ["yes", "no"],
@@ -789,7 +796,7 @@ FIELD_OPTIONS = {
 }
 
 NODE_CATEGORIES = [
-    ("Flow", ["start", "end", "loop", "counter", "note"]),
+    ("Flow", ["start", "end", "loop", "loop_frame", "counter", "note"]),
     ("Timing", ["global_delay", "delay", "wait_window", "wait_hotkey", "wait_click"]),
     ("Mouse", ["click", "move", "save_mouse", "scroll"]),
     ("Keyboard", ["key", "hotkey", "type"]),
@@ -820,10 +827,13 @@ class MacroStudio(tk.Tk):
         self.canvas_image_refs = []
         self.inspector_vars = {}
         self.suppress_dirty = False
+        self.suppress_history = False
         self.pending_connection_source = None
         self.connection_drag = None
         self.drag = None
         self.drag_moved = False
+        self.drag_history_snapshot = None
+        self.fast_canvas_render = False
         self.zoom = 1.0
         self.recording = False
         self.playing = False
@@ -888,7 +898,7 @@ class MacroStudio(tk.Tk):
     def incoming_edges(self, node):
         return [edge for edge in self.doc.edges if edge.get("to") == node.node_id]
 
-    def add_edge(self, source, target, refresh=True):
+    def add_edge(self, source, target, refresh=True, record=True):
         if not source or not target or source == target:
             return False
         if source.node_type == "end" or target.node_type == "start":
@@ -896,6 +906,8 @@ class MacroStudio(tk.Tk):
         edge = {"from": source.node_id, "to": target.node_id}
         if edge in self.doc.edges:
             return False
+        if record:
+            self.record_history()
         self.doc.edges.append(edge)
         self.mark_dirty()
         if refresh:
@@ -1209,6 +1221,9 @@ class MacroStudio(tk.Tk):
         self.add_menu_button(menu_bar, "File", file_menu)
 
         edit_menu = self.create_styled_menu(menu_bar)
+        edit_menu.add_command(label="Undo", accelerator="Ctrl+Z", command=self.undo)
+        edit_menu.add_command(label="Redo", accelerator="Ctrl+Y", command=self.redo)
+        edit_menu.add_separator()
         edit_menu.add_command(label="Connect From Selected", command=self.begin_connection_from_selected)
         edit_menu.add_command(label="Connect To Selected", command=self.connect_pending_to_selected)
         edit_menu.add_command(label="Unlink Node", command=self.unlink_selected)
@@ -1314,6 +1329,8 @@ class MacroStudio(tk.Tk):
         self.bind("<Control-s>", lambda _e: self.save_macro())
         self.bind("<Control-o>", lambda _e: self.load_macro())
         self.bind("<Control-n>", lambda _e: self.new_macro())
+        self.bind("<Control-z>", self.undo)
+        self.bind("<Control-y>", self.redo)
         self.bind("<Delete>", lambda _e: self.delete_selected())
         self.bind("<space>", self.on_play_shortcut)
         self.bind("<Escape>", self.on_stop_shortcut)
@@ -1389,6 +1406,81 @@ class MacroStudio(tk.Tk):
         if not self.suppress_dirty:
             self.doc.dirty = True
             self.update_current_tab_title()
+
+    def document_snapshot(self):
+        return {
+            "nodes": [
+                {
+                    "id": node.node_id,
+                    "type": node.node_type,
+                    "x": node.x,
+                    "y": node.y,
+                    "data": json.loads(json.dumps(node.data)),
+                }
+                for node in self.nodes
+            ],
+            "edges": json.loads(json.dumps(self.doc.edges)),
+            "selected": self.selected.node_id if self.selected else None,
+        }
+
+    def push_history_snapshot(self, snapshot):
+        if self.suppress_history:
+            return
+        if not self.doc.undo_stack or self.doc.undo_stack[-1] != snapshot:
+            self.doc.undo_stack.append(snapshot)
+            self.doc.undo_stack = self.doc.undo_stack[-100:]
+        self.doc.redo_stack.clear()
+
+    def record_history(self):
+        self.push_history_snapshot(self.document_snapshot())
+
+    def restore_snapshot(self, snapshot):
+        selected_id = snapshot.get("selected")
+        nodes = [
+            MacroNode(
+                item["type"],
+                item.get("x", 80),
+                item.get("y", 80),
+                json.loads(json.dumps(item.get("data", {}))),
+                item.get("id") or uuid.uuid4().hex[:10],
+            )
+            for item in snapshot.get("nodes", [])
+        ]
+        self.doc.nodes = nodes
+        self.doc.edges = json.loads(json.dumps(snapshot.get("edges", [])))
+        self.doc.selected = next((node for node in nodes if node.node_id == selected_id), None)
+        self.doc.dirty = True
+        self.refresh()
+
+    def undo(self, _event=None):
+        if not self.doc.undo_stack:
+            self.status.set("Nothing to undo")
+            return "break"
+        current = self.document_snapshot()
+        snapshot = self.doc.undo_stack.pop()
+        self.doc.redo_stack.append(current)
+        self.suppress_history = True
+        try:
+            self.restore_snapshot(snapshot)
+        finally:
+            self.suppress_history = False
+        self.status.set("Undo")
+        return "break"
+
+    def redo(self, _event=None):
+        if not self.doc.redo_stack:
+            self.status.set("Nothing to redo")
+            return "break"
+        current = self.document_snapshot()
+        snapshot = self.doc.redo_stack.pop()
+        self.doc.undo_stack.append(current)
+        self.suppress_history = True
+        try:
+            self.restore_snapshot(snapshot)
+        finally:
+            self.suppress_history = False
+        self.status.set("Redo")
+        return "break"
 
     def update_current_tab_title(self):
         current = self.tabs.select()
@@ -1623,6 +1715,43 @@ class MacroStudio(tk.Tk):
     def node_display_h(self):
         return graph_ui(NODE_H)
 
+    def node_world_w(self, node):
+        if node.node_type == "loop_frame":
+            return max(self.node_display_w(), graph_ui(safe_float(node.data.get("width", 360), 360)))
+        return self.node_display_w()
+
+    def node_world_h(self, node):
+        if node.node_type == "loop_frame":
+            return max(self.node_display_h() * 2, graph_ui(safe_float(node.data.get("height", 300), 300)))
+        return self.node_display_h()
+
+    def node_center(self, node):
+        return node.x + self.node_world_w(node) / 2, node.y + self.node_world_h(node) / 2
+
+    def node_inside_frame(self, node, frame):
+        if node == frame:
+            return False
+        if node.node_type == "loop_frame":
+            node_right = node.x + self.node_world_w(node)
+            node_bottom = node.y + self.node_world_h(node)
+            frame_right = frame.x + self.node_world_w(frame)
+            frame_bottom = frame.y + self.node_world_h(frame)
+            return frame.x <= node.x and node_right <= frame_right and frame.y <= node.y and node_bottom <= frame_bottom
+        center_x, center_y = self.node_center(node)
+        return frame.x <= center_x <= frame.x + self.node_world_w(frame) and frame.y <= center_y <= frame.y + self.node_world_h(frame)
+
+    def containing_loop_frames(self, node):
+        frames = [frame for frame in self.nodes if frame.node_type == "loop_frame" and self.node_inside_frame(node, frame)]
+        return sorted(frames, key=lambda frame: self.node_world_w(frame) * self.node_world_h(frame))
+
+    def nearest_loop_frame(self, node):
+        frames = self.containing_loop_frames(node)
+        return frames[0] if frames else None
+
+    def loop_frame_body_nodes(self, frame):
+        body = [node for node in self.nodes if self.nearest_loop_frame(node) == frame]
+        return sorted(body, key=lambda node: (node.y, node.x))
+
     def zoom_in(self):
         self.set_zoom(self.zoom * 1.15)
 
@@ -1664,10 +1793,11 @@ class MacroStudio(tk.Tk):
         defaults = dict(NODE_TYPES[node_type]["defaults"])
         if data:
             defaults.update(data)
+        self.record_history()
         node = MacroNode(node_type, x or 80, y or 70 + len(self.nodes) * 88, defaults)
         self.nodes.append(node)
         if previous and previous in self.nodes and previous != node:
-            self.add_edge(previous, node, refresh=False)
+            self.add_edge(previous, node, refresh=False, record=False)
         self.selected = node
         self.mark_dirty()
         self.refresh()
@@ -1677,6 +1807,7 @@ class MacroStudio(tk.Tk):
         end = self.end_node()
         x = predecessor.x if predecessor else 330
         y = (predecessor.y + 104) if predecessor else 70 + len(self.nodes) * 90
+        self.record_history()
         node = MacroNode(
             "recorded",
             x,
@@ -1686,31 +1817,43 @@ class MacroStudio(tk.Tk):
         self.nodes.append(node)
         if predecessor and end:
             self.remove_edge(predecessor, end)
-            self.add_edge(predecessor, node, refresh=False)
-            self.add_edge(node, end, refresh=False)
+            self.add_edge(predecessor, node, refresh=False, record=False)
+            self.add_edge(node, end, refresh=False, record=False)
             end.x = x
             end.y = y + 104
         elif predecessor:
-            self.add_edge(predecessor, node, refresh=False)
+            self.add_edge(predecessor, node, refresh=False, record=False)
         self.record_insert_after_id = node.node_id
         self.selected = node
         self.mark_dirty()
         self.refresh()
 
-    def refresh(self):
+    def refresh(self, update_inspector=True, update_status=True, update_scrollregion=True, fast=False):
         if not hasattr(self, "canvas"):
             return
-        self.canvas.delete("all")
-        self.node_items.clear()
-        self.port_items.clear()
-        self.canvas_image_refs.clear()
-        self.update_canvas_scrollregion()
-        ordered = sorted(self.nodes, key=lambda n: n.y)
-        self.draw_edges()
-        for node in ordered:
-            self.draw_node(node)
-        self.update_inspector()
-        self.update_current_tab_title()
+        previous_fast = self.fast_canvas_render
+        self.fast_canvas_render = fast
+        try:
+            self.canvas.delete("all")
+            self.node_items.clear()
+            self.port_items.clear()
+            self.canvas_image_refs.clear()
+            if update_scrollregion:
+                self.update_canvas_scrollregion()
+            ordered = sorted(self.nodes, key=lambda n: n.y)
+            for node in ordered:
+                if node.node_type == "loop_frame":
+                    self.draw_node(node)
+            self.draw_edges()
+            for node in ordered:
+                if node.node_type != "loop_frame":
+                    self.draw_node(node)
+            if update_inspector:
+                self.update_inspector()
+            if update_status:
+                self.update_current_tab_title()
+        finally:
+            self.fast_canvas_render = previous_fast
 
     def draw_edges(self):
         for edge in self.doc.edges:
@@ -1726,17 +1869,18 @@ class MacroStudio(tk.Tk):
             elif source == self.selected:
                 color = THEME["accent"]
                 width = 3
-            node_w = self.node_display_w()
-            node_h = self.node_display_h()
-            x1 = self.to_screen(source.x + node_w / 2)
-            y1 = self.to_screen(source.y + node_h)
-            x2 = self.to_screen(target.x + node_w / 2)
+            source_w = self.node_world_w(source)
+            source_h = self.node_world_h(source)
+            target_w = self.node_world_w(target)
+            x1 = self.to_screen(source.x + source_w / 2)
+            y1 = self.to_screen(source.y + source_h)
+            x2 = self.to_screen(target.x + target_w / 2)
             y2 = self.to_screen(target.y)
             self.draw_edge_curve(x1, y1, x2, y2, color, max(1, int(width * self.zoom)))
 
     def draw_edge_curve(self, x1, y1, x2, y2, color, width):
         mid_y = y1 + max(28, (y2 - y1) / 2)
-        if Image is None:
+        if Image is None or self.fast_canvas_render:
             self.canvas.create_line(
                 x1,
                 y1,
@@ -1798,8 +1942,8 @@ class MacroStudio(tk.Tk):
         max_x = WORKSPACE_MIN_W
         max_y = WORKSPACE_MIN_H
         for node in self.nodes:
-            max_x = max(max_x, node.x + self.node_display_w() + 300)
-            max_y = max(max_y, node.y + self.node_display_h() + 300)
+            max_x = max(max_x, node.x + self.node_world_w(node) + 300)
+            max_y = max(max_y, node.y + self.node_world_h(node) + 300)
         width = max(self.to_screen(max_x), viewport_w)
         height = max(self.to_screen(max_y), viewport_h)
         self.canvas.configure(scrollregion=(0, 0, width, height))
@@ -1814,10 +1958,13 @@ class MacroStudio(tk.Tk):
         return width, height
 
     def draw_node(self, node):
+        if node.node_type == "loop_frame":
+            self.draw_loop_frame(node)
+            return
         x = self.to_screen(node.x)
         y = self.to_screen(node.y)
-        w = self.to_screen(self.node_display_w())
-        h = self.to_screen(self.node_display_h())
+        w = self.to_screen(self.node_world_w(node))
+        h = self.to_screen(self.node_world_h(node))
         active = node.node_id == self.active_node_id
         fill = THEME["node_active"] if active else THEME["node_selected"] if node == self.selected else THEME["node"]
         outline = THEME["node_active_outline"] if active else THEME["line_hot"] if node == self.selected else THEME["line"]
@@ -1837,8 +1984,46 @@ class MacroStudio(tk.Tk):
         if detail:
             self.node_items[detail] = node
 
+    def draw_loop_frame(self, node):
+        x = self.to_screen(node.x)
+        y = self.to_screen(node.y)
+        w = self.to_screen(self.node_world_w(node))
+        h = self.to_screen(self.node_world_h(node))
+        active = node.node_id == self.active_node_id
+        fill = "#10231f" if node != self.selected and not active else THEME["node_selected"]
+        outline = THEME["node_active_outline"] if active else THEME["accent"] if node == self.selected else THEME["line"]
+        outline_width = 3 if active or node == self.selected else 2
+        radius = max(5, int(10 * self.zoom))
+        header_h = self.to_screen(graph_ui(40))
+        self.draw_antialiased_round_rect(x + self.to_screen(5), y + self.to_screen(6), w, h, radius, "#04070a", "")
+        self.draw_antialiased_round_rect(x, y, w, h, radius, fill, outline, max(1, int(outline_width * self.zoom)))
+        self.canvas.create_rectangle(x, y + header_h, x + w, y + header_h + max(1, int(self.zoom)), fill=THEME["line"], outline="")
+        self.draw_antialiased_round_rect(x, y, self.to_screen(8), h, radius, THEME["accent"], THEME["accent"])
+        rect = self.canvas.create_rectangle(x, y, x + w, y + h, fill="", outline="", width=0)
+        title = self.canvas.create_text(
+            x + self.to_screen(graph_ui(16)),
+            y + self.to_screen(graph_ui(11)),
+            text=node.title,
+            fill=THEME["text"],
+            anchor="nw",
+            font=(UI_FONT, max(8, int(10 * self.zoom)), "bold"),
+        )
+        summary = self.canvas.create_text(
+            x + self.to_screen(graph_ui(160)),
+            y + self.to_screen(graph_ui(12)),
+            text=self.node_summary(node),
+            fill=THEME["muted"],
+            anchor="nw",
+            font=(UI_FONT, max(7, int(9 * self.zoom))),
+            width=max(90, w - self.to_screen(graph_ui(176))),
+        )
+        self.draw_ports(node, x, y, w, h)
+        self.node_items[rect] = node
+        self.node_items[title] = node
+        self.node_items[summary] = node
+
     def draw_antialiased_round_rect(self, x, y, w, h, radius, fill, outline="", width=1):
-        if Image is None:
+        if Image is None or self.fast_canvas_render:
             return rounded_rect(self.canvas, x, y, x + w, y + h, radius, fill=fill, outline=outline, width=width)
         scale = 3
         image_w = max(1, int(w))
@@ -1872,7 +2057,7 @@ class MacroStudio(tk.Tk):
             self.port_items[item] = (node, "output")
 
     def draw_port_circle(self, center_x, center_y, radius, fill, outline, width):
-        if Image is not None:
+        if Image is not None and not self.fast_canvas_render:
             scale = 4
             pad = max(width + 2, 4)
             image_size = int((radius + pad) * 2)
@@ -1890,9 +2075,9 @@ class MacroStudio(tk.Tk):
             center_y - radius,
             center_x + radius,
             center_y + radius,
-            fill="",
-            outline="",
-            width=0,
+            fill="" if not self.fast_canvas_render else fill,
+            outline="" if not self.fast_canvas_render else outline,
+            width=0 if not self.fast_canvas_render else width,
         )
         return item
 
@@ -1911,6 +2096,12 @@ class MacroStudio(tk.Tk):
             if settings["mode"] == "until hotkey":
                 return f"until {settings.get('stop_hotkey', 'stop hotkey')}"
             return f"run script {settings['count']} times"
+        if node.node_type == "loop_frame":
+            settings = self.loop_settings(node)
+            body_count = len(self.loop_frame_body_nodes(node))
+            if settings["mode"] == "until hotkey":
+                return f"{body_count} nodes until {settings.get('stop_hotkey', 'stop hotkey')}"
+            return f"{body_count} nodes x {settings['count']}"
         if node.node_type == "paste" and node.data.get("source") != "clipboard":
             source = node.data.get("source")
             if source == "data":
@@ -1945,7 +2136,7 @@ class MacroStudio(tk.Tk):
             self.connection_drag = {
                 "source": node,
                 "line": None,
-                "start": (self.to_screen(node.x + self.node_display_w() / 2), self.to_screen(node.y + self.node_display_h())),
+                "start": (self.to_screen(node.x + self.node_world_w(node) / 2), self.to_screen(node.y + self.node_world_h(node))),
             }
             self.drag = None
             self.drag_moved = False
@@ -1955,6 +2146,7 @@ class MacroStudio(tk.Tk):
         node = self.node_items.get(item[0]) if item else None
         self.selected = node
         self.drag = (node, self.from_screen(canvas_x) - node.x, self.from_screen(canvas_y) - node.y) if node else None
+        self.drag_history_snapshot = self.document_snapshot() if node else None
         self.drag_moved = False
         self.refresh()
 
@@ -1972,7 +2164,7 @@ class MacroStudio(tk.Tk):
         self.drag_moved = self.drag_moved or node.x != new_x or node.y != new_y
         node.x = new_x
         node.y = new_y
-        self.refresh()
+        self.refresh(update_inspector=False, update_status=False, update_scrollregion=False, fast=True)
 
     def on_canvas_release(self, event):
         if self.connection_drag:
@@ -1981,7 +2173,10 @@ class MacroStudio(tk.Tk):
         self.drag = None
         self.nodes.sort(key=lambda n: n.y)
         if self.drag_moved:
+            if self.drag_history_snapshot:
+                self.push_history_snapshot(self.drag_history_snapshot)
             self.mark_dirty()
+        self.drag_history_snapshot = None
         self.drag_moved = False
         self.refresh()
 
@@ -2114,6 +2309,7 @@ class MacroStudio(tk.Tk):
             return
         new_value = self.coerce_value(var.get())
         if self.selected.data.get(key) != new_value:
+            self.record_history()
             self.selected.data[key] = new_value
             self.mark_dirty()
             self.refresh()
@@ -2123,6 +2319,7 @@ class MacroStudio(tk.Tk):
             return
         new_value = widget.get("1.0", "end-1c")
         if self.selected.data.get(key) != new_value:
+            self.record_history()
             self.selected.data[key] = new_value
             self.mark_dirty()
             self.refresh()
@@ -2131,13 +2328,18 @@ class MacroStudio(tk.Tk):
         if not self.selected:
             return
         value = var.get().strip()
+        if not value:
+            return
         default_title = NODE_TYPES[self.selected.node_type]["title"]
         old_value = self.selected.data.get("_label", default_title)
+        changed = old_value != (value or default_title)
+        if changed:
+            self.record_history()
         if value == default_title:
             self.selected.data.pop("_label", None)
         elif value:
             self.selected.data["_label"] = value
-        if old_value != self.selected.title:
+        if changed:
             self.mark_dirty()
             self.refresh()
 
@@ -2186,6 +2388,9 @@ class MacroStudio(tk.Tk):
     def unlink_selected(self):
         if not self.selected:
             return
+        if not self.incoming_edges(self.selected) and not self.outgoing_edges(self.selected):
+            return
+        self.record_history()
         if self.remove_edges_for_node(self.selected):
             self.mark_dirty()
             self.refresh()
@@ -2196,6 +2401,7 @@ class MacroStudio(tk.Tk):
         ends = [node for node in self.nodes if node.node_type == "end"]
         middle = [node for node in self.nodes if node.node_type not in ("start", "end")]
         ordered = starts[:1] + sorted(middle, key=lambda n: (n.y, n.x)) + ends[:1]
+        self.record_history()
         self.doc.edges = [{"from": a.node_id, "to": b.node_id} for a, b in zip(ordered, ordered[1:])]
         self.mark_dirty()
         self.refresh()
@@ -2213,6 +2419,7 @@ class MacroStudio(tk.Tk):
         x = 170
         y = 96
         gap = 118
+        self.record_history()
         for index, node in enumerate(ordered):
             node.x = x
             node.y = y + index * gap
@@ -2224,6 +2431,7 @@ class MacroStudio(tk.Tk):
 
     def delete_selected(self):
         if self.selected in self.nodes:
+            self.record_history()
             self.remove_edges_for_node(self.selected)
             self.nodes.remove(self.selected)
             self.selected = None
@@ -2235,6 +2443,9 @@ class MacroStudio(tk.Tk):
             return
         idx = self.nodes.index(self.selected)
         new_idx = min(max(idx + direction, 0), len(self.nodes) - 1)
+        if new_idx == idx:
+            return
+        self.record_history()
         self.nodes[idx], self.nodes[new_idx] = self.nodes[new_idx], self.nodes[idx]
         self.selected.y, self.nodes[idx].y = self.nodes[idx].y, self.selected.y
         self.mark_dirty()
@@ -2242,6 +2453,7 @@ class MacroStudio(tk.Tk):
 
     def clear_nodes(self):
         if messagebox.askyesno("Clear Script", "Remove all nodes from this script?"):
+            self.record_history()
             self.nodes.clear()
             self.doc.edges.clear()
             self.selected = None
@@ -2519,6 +2731,7 @@ class MacroStudio(tk.Tk):
             "variables": {},
             "datasets": {},
             "paste_index": 0,
+            "paste_indices": {},
             "paste_cache": {},
         }
 
@@ -2535,7 +2748,11 @@ class MacroStudio(tk.Tk):
         if global_delay_nodes:
             global_delay = max(0, safe_float(global_delay_nodes[0].data.get("seconds", 0), 0))
         script_level_nodes = {"loop", "global_delay"}
-        return [node for node in ordered if node.node_type not in script_level_nodes], loop_settings, global_delay
+        return [
+            node
+            for node in ordered
+            if node.node_type not in script_level_nodes and self.nearest_loop_frame(node) is None
+        ], loop_settings, global_delay
 
     def loop_settings(self, node):
         mode = str(node.data.get("mode", "count")).lower()
@@ -2598,6 +2815,7 @@ class MacroStudio(tk.Tk):
             return
         try:
             nodes, loop_settings, global_delay = self.playback_nodes_and_count()
+            self.play_context["global_delay"] = global_delay
             loop_count = loop_settings["count"]
             if loop_settings["mode"] == "until hotkey":
                 self.start_playback_stop_listener(loop_settings.get("stop_hotkey", ""))
@@ -2605,23 +2823,13 @@ class MacroStudio(tk.Tk):
             while self.playing and (loop_count is None or iteration < loop_count):
                 iteration += 1
                 self.play_context["iteration"] = iteration
+                self.play_context["loop_index"] = iteration - 1
                 self.play_context["loop_count"] = loop_count or "until stopped"
                 if loop_count is None:
                     self.status.set(f"Playing loop {iteration}; stop with {display_hotkey(loop_settings.get('stop_hotkey', ''))}")
                 else:
                     self.status.set(f"Playing loop {iteration} of {loop_count}")
-                for index, node in enumerate(nodes):
-                    if not self.playing:
-                        break
-                    if global_delay > 0 and (iteration > 0 or index > 0):
-                        self.wait_interruptible(global_delay)
-                    if not self.playing:
-                        break
-                    self.active_node_id = node.node_id
-                    self.refresh()
-                    self.update()
-                    self.execute_node(node)
-                    self.update()
+                self.execute_node_sequence(nodes, global_delay)
                 if not self.playing:
                     break
             self.status.set("Playback complete" if self.playing else "Playback stopped")
@@ -2635,6 +2843,60 @@ class MacroStudio(tk.Tk):
             self.play_context = None
             self.refresh()
 
+    def execute_node_sequence(self, nodes, global_delay=0):
+        for index, node in enumerate(nodes):
+            if not self.playing:
+                break
+            if global_delay > 0 and index > 0:
+                self.wait_interruptible(global_delay)
+            if not self.playing:
+                break
+            self.active_node_id = node.node_id
+            self.refresh()
+            self.update()
+            self.execute_node(node)
+            self.update()
+
+    def execute_loop_frame(self, frame):
+        body = self.loop_frame_body_nodes(frame)
+        if not body:
+            return
+        settings = self.loop_settings(frame)
+        loop_count = settings["count"]
+        if settings["mode"] == "until hotkey":
+            self.start_playback_stop_listener(settings.get("stop_hotkey", ""))
+        previous_iteration = self.play_context.get("iteration") if self.play_context else None
+        previous_loop_index = self.play_context.get("loop_index") if self.play_context else None
+        previous_loop_count = self.play_context.get("loop_count") if self.play_context else None
+        global_delay = self.play_context.get("global_delay", 0) if self.play_context else 0
+        iteration = 0
+        try:
+            while self.playing and (loop_count is None or iteration < loop_count):
+                iteration += 1
+                if self.play_context is not None:
+                    self.play_context["iteration"] = iteration
+                    self.play_context["loop_index"] = iteration - 1
+                    self.play_context["loop_count"] = loop_count or "until stopped"
+                if loop_count is None:
+                    self.status.set(f"{frame.title} loop {iteration}; stop with {display_hotkey(settings.get('stop_hotkey', ''))}")
+                else:
+                    self.status.set(f"{frame.title} loop {iteration} of {loop_count}")
+                self.execute_node_sequence(body, global_delay)
+        finally:
+            if self.play_context is not None:
+                if previous_iteration is None:
+                    self.play_context.pop("iteration", None)
+                else:
+                    self.play_context["iteration"] = previous_iteration
+                if previous_loop_index is None:
+                    self.play_context.pop("loop_index", None)
+                else:
+                    self.play_context["loop_index"] = previous_loop_index
+                if previous_loop_count is None:
+                    self.play_context.pop("loop_count", None)
+                else:
+                    self.play_context["loop_count"] = previous_loop_count
+
     def execute_node(self, node):
         data = node.data
         kind = node.node_type
@@ -2644,6 +2906,8 @@ class MacroStudio(tk.Tk):
             self.execute_counter(data)
         elif kind == "delay":
             self.wait_interruptible(safe_float(data.get("seconds", 0.5), 0.5))
+        elif kind == "loop_frame":
+            self.execute_loop_frame(node)
         elif kind == "wait_window":
             self.wait_for_window_title(str(data.get("title_contains", "")), safe_float(data.get("timeout", 10), 10))
         elif kind == "wait_hotkey":
@@ -2674,7 +2938,7 @@ class MacroStudio(tk.Tk):
         elif kind == "cut":
             WindowsInput.hotkey(["ctrl", "x"])
         elif kind == "paste":
-            self.execute_paste(data)
+            self.execute_paste(data, node.node_id)
         elif kind == "clipboard":
             self.clipboard_clear()
             self.clipboard_append(self.render_template(str(data.get("text", ""))))
@@ -2879,7 +3143,7 @@ class MacroStudio(tk.Tk):
         self.play_context["counters"][name] = current + step
         self.status.set(f"{name}: {self.play_context['counters'][name]}")
 
-    def execute_paste(self, data):
+    def execute_paste(self, data, node_id=None):
         source = str(data.get("source", "clipboard"))
         if source == "clipboard":
             WindowsInput.paste_clipboard()
@@ -2887,10 +3151,13 @@ class MacroStudio(tk.Tk):
         values = self.get_paste_values(data)
         if not values:
             return
-        context = self.play_context or {"paste_index": 0}
-        index = context.get("paste_index", 0) % len(values)
+        context = self.play_context or {"paste_index": 0, "paste_indices": {}}
+        cursor_key = str(node_id or json.dumps(data, sort_keys=True))
+        paste_indices = context.setdefault("paste_indices", {})
+        index = paste_indices.get(cursor_key, 0) % len(values)
         text = self.render_template(values[index])
-        context["paste_index"] = context.get("paste_index", 0) + 1
+        paste_indices[cursor_key] = paste_indices.get(cursor_key, 0) + 1
+        context["paste_index"] = max(context.get("paste_index", 0), paste_indices[cursor_key])
         self.clipboard_clear()
         self.clipboard_append(text)
         self.update()
@@ -2926,6 +3193,7 @@ class MacroStudio(tk.Tk):
             return text
         values = {
             "iteration": self.play_context.get("iteration", 1),
+            "loop_index": self.play_context.get("loop_index", max(0, safe_int(self.play_context.get("iteration", 1), 1) - 1)),
             "loop_count": self.play_context.get("loop_count", 1),
         }
         values.update(self.play_context.get("counters", {}))
@@ -2939,7 +3207,40 @@ class MacroStudio(tk.Tk):
         return text
 
     def resolve_int(self, value, fallback=0):
-        return safe_int(self.render_template(str(value)), fallback)
+        rendered = self.render_template(str(value)).strip()
+        calculated = self.evaluate_numeric_expression(rendered)
+        if calculated is not None:
+            return int(round(calculated))
+        return safe_int(rendered, fallback)
+
+    def evaluate_numeric_expression(self, text):
+        try:
+            parsed = ast.parse(text, mode="eval")
+            return self.evaluate_numeric_ast(parsed.body)
+        except (SyntaxError, ValueError, TypeError, ZeroDivisionError):
+            return None
+
+    def evaluate_numeric_ast(self, node):
+        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+            return float(node.value)
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            value = self.evaluate_numeric_ast(node.operand)
+            return value if isinstance(node.op, ast.UAdd) else -value
+        if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv, ast.Mod)):
+            left = self.evaluate_numeric_ast(node.left)
+            right = self.evaluate_numeric_ast(node.right)
+            if isinstance(node.op, ast.Add):
+                return left + right
+            if isinstance(node.op, ast.Sub):
+                return left - right
+            if isinstance(node.op, ast.Mult):
+                return left * right
+            if isinstance(node.op, ast.Div):
+                return left / right
+            if isinstance(node.op, ast.FloorDiv):
+                return left // right
+            return left % right
+        raise ValueError("Unsupported numeric expression")
 
     def load_paste_file(self, file_path, column):
         path = Path(file_path)

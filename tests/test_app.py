@@ -140,6 +140,84 @@ class GraphTests(MacroStudioTestCase):
         start_listener.assert_called_once_with("<ctrl>+q")
         self.assertEqual(iterations, [1, 2, 3])
 
+    def test_loop_frame_is_available_in_flow_category(self):
+        self.assertIn("loop_frame", app.NODE_TYPES)
+        flow = next(items for label, items in app.NODE_CATEGORIES if label == "Flow")
+        self.assertIn("loop_frame", flow)
+
+    def test_loop_frame_body_uses_visual_containment_and_nearest_frame(self):
+        outer = app.MacroNode("loop_frame", 100, 100, {"width": 420, "height": 420, "count": 2})
+        inner = app.MacroNode("loop_frame", 180, 190, {"width": 220, "height": 190, "count": 3})
+        outer_delay = app.MacroNode("delay", 120, 500, {"seconds": 0})
+        inner_delay = app.MacroNode("delay", 230, 250, {"seconds": 0})
+        outside_delay = app.MacroNode("delay", 700, 700, {"seconds": 0})
+        self.studio.nodes = [outer, inner, outer_delay, inner_delay, outside_delay]
+
+        self.assertEqual(self.studio.nearest_loop_frame(outer_delay), outer)
+        self.assertEqual(self.studio.nearest_loop_frame(inner_delay), inner)
+        self.assertIsNone(self.studio.nearest_loop_frame(outside_delay))
+        self.assertEqual(self.studio.loop_frame_body_nodes(outer), [inner, outer_delay])
+        self.assertEqual(self.studio.loop_frame_body_nodes(inner), [inner_delay])
+
+    def test_playback_excludes_nodes_inside_loop_frames_from_top_level(self):
+        start = app.MacroNode("start", 80, 80, {})
+        frame = app.MacroNode("loop_frame", 80, 180, {"width": 360, "height": 240, "count": 2})
+        body_delay = app.MacroNode("delay", 160, 260, {"seconds": 0})
+        end = app.MacroNode("end", 80, 520, {})
+        self.studio.nodes = [start, frame, body_delay, end]
+        self.studio.doc.edges = []
+
+        nodes, _loop_settings, _global_delay = self.studio.playback_nodes_and_count()
+
+        self.assertEqual(nodes, [start, frame, end])
+
+    def test_loop_frame_executes_body_count_times(self):
+        start = app.MacroNode("start", 80, 80, {})
+        frame = app.MacroNode("loop_frame", 80, 180, {"width": 360, "height": 260, "count": 3})
+        delay = app.MacroNode("delay", 150, 270, {"seconds": 0})
+        end = app.MacroNode("end", 80, 560, {})
+        self.studio.nodes = [start, frame, delay, end]
+        self.studio.doc.edges = []
+        seen = []
+        original_execute_node = self.studio.execute_node
+
+        def capture(node):
+            if node.node_type == "delay":
+                seen.append((self.studio.play_context["iteration"], self.studio.play_context["loop_index"]))
+            original_execute_node(node)
+
+        with patch.object(self.studio, "wait_interruptible", lambda _seconds: None), \
+            patch.object(self.studio, "execute_node", capture):
+            self.studio.playing = True
+            self.studio.play_context = self.studio.create_play_context()
+            self.studio._play_after_countdown(0)
+
+        self.assertEqual(seen, [(1, 0), (2, 1), (3, 2)])
+
+    def test_nested_loop_frames_execute_inner_frame_as_body(self):
+        start = app.MacroNode("start", 80, 80, {})
+        outer = app.MacroNode("loop_frame", 80, 180, {"width": 520, "height": 420, "count": 2})
+        inner = app.MacroNode("loop_frame", 170, 280, {"width": 280, "height": 220, "count": 3})
+        delay = app.MacroNode("delay", 230, 360, {"seconds": 0})
+        end = app.MacroNode("end", 80, 700, {})
+        self.studio.nodes = [start, outer, inner, delay, end]
+        self.studio.doc.edges = []
+        seen = []
+        original_execute_node = self.studio.execute_node
+
+        def capture(node):
+            if node.node_type == "delay":
+                seen.append(node.node_id)
+            original_execute_node(node)
+
+        with patch.object(self.studio, "wait_interruptible", lambda _seconds: None), \
+            patch.object(self.studio, "execute_node", capture):
+            self.studio.playing = True
+            self.studio.play_context = self.studio.create_play_context()
+            self.studio._play_after_countdown(0)
+
+        self.assertEqual(len(seen), 6)
+
 
 class PersistenceTests(MacroStudioTestCase):
     def test_save_and_load_preserves_node_ids_and_edges(self):
@@ -227,6 +305,7 @@ class DataAndUiTests(MacroStudioTestCase):
     def test_render_template_uses_loop_and_counter_values(self):
         self.studio.play_context = {
             "iteration": 2,
+            "loop_index": 1,
             "loop_count": 5,
             "counters": {"counter": 9},
             "variables": {},
@@ -234,7 +313,7 @@ class DataAndUiTests(MacroStudioTestCase):
             "paste_index": 0,
             "paste_cache": {},
         }
-        self.assertEqual(self.studio.render_template("item-{counter}-{iteration}/{loop_count}"), "item-9-2/5")
+        self.assertEqual(self.studio.render_template("item-{counter}-{loop_index}-{iteration}/{loop_count}"), "item-9-1-2/5")
 
     def test_render_template_uses_saved_variables(self):
         self.studio.play_context = self.studio.create_play_context()
@@ -262,6 +341,26 @@ class DataAndUiTests(MacroStudioTestCase):
             self.studio.execute_node(app.MacroNode("move", 0, 0, {"x": "{first_click_x}", "y": "{first_click_y}"}))
 
         move.assert_called_once_with(111, 222)
+
+    def test_mouse_nodes_accept_saved_coordinate_math_offsets(self):
+        self.studio.play_context = self.studio.create_play_context()
+        self.studio.set_play_variable("first_click_x", 111)
+        self.studio.set_play_variable("first_click_y", 222)
+        self.studio.play_context["loop_index"] = 3
+
+        with patch.object(app.WindowsInput, "move_mouse") as move:
+            self.studio.execute_node(app.MacroNode("move", 0, 0, {"x": "{first_click_x}+({loop_index}*25)", "y": "({first_click_y}-10)"}))
+
+        move.assert_called_once_with(186, 212)
+
+    def test_workflow_nodes_cover_click_paste_loop_and_wait_click_sequence(self):
+        self.assertIn("wait_click", app.NODE_TYPES)
+        self.assertIn("loop_frame", app.NODE_TYPES)
+        self.assertIn("click", app.NODE_TYPES)
+        self.assertIn("paste", app.NODE_TYPES)
+        self.assertIn("key", app.NODE_TYPES)
+        self.assertEqual(app.NODE_TYPES["paste"]["defaults"]["source"], "clipboard")
+        self.assertIn("file", app.FIELD_OPTIONS[("paste", "source")])
 
     def test_save_clipboard_node_stores_clipboard_variable(self):
         self.studio.play_context = self.studio.create_play_context()
@@ -513,6 +612,24 @@ class DataAndUiTests(MacroStudioTestCase):
         self.assertGreaterEqual(len(self.studio.canvas_image_refs), 3)
         self.assertGreaterEqual(len(self.studio.port_items), 2)
 
+    def test_drag_uses_fast_canvas_refresh(self):
+        start = self.node("start")
+        self.studio.drag = (start, 0, 0)
+        calls = []
+
+        def capture_refresh(**kwargs):
+            calls.append(kwargs)
+
+        event = type("Event", (), {"x": 240, "y": 260})()
+        with patch.object(self.studio, "refresh", capture_refresh):
+            self.studio.on_canvas_drag(event)
+
+        self.assertTrue(calls)
+        self.assertTrue(calls[-1]["fast"])
+        self.assertFalse(calls[-1]["update_inspector"])
+        self.assertFalse(calls[-1]["update_status"])
+        self.assertFalse(calls[-1]["update_scrollregion"])
+
     @unittest.skipIf(app.Image is None, "Pillow is unavailable")
     def test_nodes_use_antialiased_panel_images_with_text_hit_targets(self):
         self.studio.refresh()
@@ -620,6 +737,63 @@ class DataAndUiTests(MacroStudioTestCase):
 
         self.assertEqual(calls, ["paste"])
         self.assertEqual(self.studio.clipboard_get(), "first")
+
+    def test_file_paste_continues_across_nested_loop_iterations(self):
+        start = app.MacroNode("start", 80, 80, {})
+        outer = app.MacroNode("loop_frame", 80, 180, {"width": 620, "height": 520, "count": 2})
+        inner = app.MacroNode("loop_frame", 150, 270, {"width": 420, "height": 320, "count": 4})
+        end = app.MacroNode("end", 80, 780, {})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "items.csv"
+            path.write_text("\n".join(f"item-{index}" for index in range(1, 9)), encoding="utf-8")
+            paste = app.MacroNode("paste", 220, 360, {"source": "file", "file_path": str(path), "column": 1})
+            self.studio.nodes = [start, outer, inner, paste, end]
+            self.studio.doc.edges = [
+                {"from": start.node_id, "to": outer.node_id},
+                {"from": outer.node_id, "to": end.node_id},
+            ]
+            pasted = []
+
+            def capture_paste():
+                pasted.append(self.studio.clipboard_get())
+
+            with patch.object(app.WindowsInput, "paste_clipboard", capture_paste), \
+                patch.object(app.time, "sleep", lambda _seconds: None):
+                self.studio.playing = True
+                self.studio.play_context = self.studio.create_play_context()
+                self.studio._play_after_countdown(0)
+
+        self.assertEqual(pasted, [f"item-{index}" for index in range(1, 9)])
+
+    def test_paste_cursors_are_tracked_per_node(self):
+        self.studio.play_context = self.studio.create_play_context()
+        data = {"source": "data", "data": "first\nsecond", "column": 1}
+        pasted = []
+
+        def capture_paste():
+            pasted.append(self.studio.clipboard_get())
+
+        with patch.object(app.WindowsInput, "paste_clipboard", capture_paste), \
+            patch.object(app.time, "sleep", lambda _seconds: None):
+            self.studio.execute_paste(data, "paste-a")
+            self.studio.execute_paste(data, "paste-a")
+            self.studio.execute_paste(data, "paste-b")
+
+        self.assertEqual(pasted, ["first", "second", "first"])
+
+    def test_undo_and_redo_restore_deleted_node(self):
+        self.studio.selected = self.node("start")
+        self.studio.add_node("delay")
+        delay_id = self.studio.selected.node_id
+
+        self.studio.delete_selected()
+        self.assertIsNone(self.studio.node_by_id(delay_id))
+
+        self.studio.undo()
+        self.assertIsNotNone(self.studio.node_by_id(delay_id))
+
+        self.studio.redo()
+        self.assertIsNone(self.studio.node_by_id(delay_id))
 
     def test_key_lookup_normalizes_control_aliases(self):
         self.assertEqual(app.WindowsInput.key_to_vk("control"), app.WindowsInput.VK["ctrl"])
