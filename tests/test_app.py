@@ -98,6 +98,48 @@ class GraphTests(MacroStudioTestCase):
         self.assertIn((delay.node_id, delay.node_id), seen)
         self.assertIsNone(self.studio.active_node_id)
 
+    def test_node_display_size_scales_without_changing_stored_node_size(self):
+        self.assertEqual(app.NODE_W, 202)
+        self.assertEqual(app.NODE_H, 72)
+        self.assertGreaterEqual(self.studio.node_display_w(), app.NODE_W)
+        self.assertGreaterEqual(self.studio.node_display_h(), app.NODE_H)
+
+    def test_loop_script_supports_until_hotkey_settings(self):
+        loop = app.MacroNode("loop", 0, 0, {"mode": "until hotkey", "count": 3, "stop_hotkey": "<ctrl>+q"})
+        settings = self.studio.loop_settings(loop)
+        self.assertEqual(settings["mode"], "until hotkey")
+        self.assertIsNone(settings["count"])
+        self.assertEqual(settings["stop_hotkey"], "<ctrl>+q")
+        self.assertIn("until", self.studio.node_summary(loop))
+
+    def test_until_hotkey_loop_runs_until_playback_stops(self):
+        start = self.node("start")
+        end = self.node("end")
+        loop = app.MacroNode("loop", 170, 170, {"mode": "until hotkey", "count": 3, "stop_hotkey": "<ctrl>+q"})
+        delay = app.MacroNode("delay", 170, 260, {"seconds": 0})
+        self.studio.nodes = [start, loop, delay, end]
+        self.studio.doc.edges = [
+            {"from": start.node_id, "to": loop.node_id},
+            {"from": loop.node_id, "to": delay.node_id},
+            {"from": delay.node_id, "to": end.node_id},
+        ]
+        iterations = []
+
+        def capture(node):
+            if node.node_type == "delay":
+                iterations.append(self.studio.play_context["iteration"])
+                if len(iterations) == 3:
+                    self.studio.playing = False
+
+        with patch.object(self.studio, "start_playback_stop_listener") as start_listener, \
+            patch.object(self.studio, "execute_node", capture):
+            self.studio.playing = True
+            self.studio.play_context = self.studio.create_play_context()
+            self.studio._play_after_countdown(0)
+
+        start_listener.assert_called_once_with("<ctrl>+q")
+        self.assertEqual(iterations, [1, 2, 3])
+
 
 class PersistenceTests(MacroStudioTestCase):
     def test_save_and_load_preserves_node_ids_and_edges(self):
@@ -162,6 +204,22 @@ class RecordingTests(MacroStudioTestCase):
 
 
 class DataAndUiTests(MacroStudioTestCase):
+    def test_mouse_move_uses_direct_physical_cursor_position(self):
+        calls = []
+
+        class FakeUser32:
+            def SetCursorPos(self, x, y):
+                calls.append((x, y))
+                return 1
+
+        class FakeWindll:
+            user32 = FakeUser32()
+
+        with patch.object(app.ctypes, "windll", FakeWindll()):
+            app.WindowsInput.move_mouse("123", "456")
+
+        self.assertEqual(calls, [(123, 456)])
+
     def test_parse_inline_paste_data_supports_excel_style_tabs(self):
         self.assertEqual(self.studio.parse_inline_paste_data("A\tB\nC\tD", 2), ["B", "D"])
         self.assertEqual(self.studio.parse_inline_paste_data("one\ntwo\n", 1), ["one", "two"])
@@ -171,19 +229,133 @@ class DataAndUiTests(MacroStudioTestCase):
             "iteration": 2,
             "loop_count": 5,
             "counters": {"counter": 9},
+            "variables": {},
+            "datasets": {},
             "paste_index": 0,
             "paste_cache": {},
         }
         self.assertEqual(self.studio.render_template("item-{counter}-{iteration}/{loop_count}"), "item-9-2/5")
 
+    def test_render_template_uses_saved_variables(self):
+        self.studio.play_context = self.studio.create_play_context()
+        self.studio.set_play_variable("first_click_x", 345)
+        self.studio.set_play_variable("first_click_y", 678)
+        self.assertEqual(self.studio.render_template("{first_click_x},{first_click_y}"), "345,678")
+
+    def test_capture_nodes_are_available(self):
+        self.assertIn("wait_click", app.NODE_TYPES)
+        self.assertIn("save_mouse", app.NODE_TYPES)
+        self.assertIn("save_clipboard", app.NODE_TYPES)
+        timing_nodes = dict(app.NODE_CATEGORIES)["Timing"]
+        mouse_nodes = dict(app.NODE_CATEGORIES)["Mouse"]
+        clipboard_nodes = dict(app.NODE_CATEGORIES)["Clipboard"]
+        self.assertIn("wait_click", timing_nodes)
+        self.assertIn("save_mouse", mouse_nodes)
+        self.assertIn("save_clipboard", clipboard_nodes)
+
+    def test_mouse_nodes_accept_saved_coordinate_placeholders(self):
+        self.studio.play_context = self.studio.create_play_context()
+        self.studio.set_play_variable("first_click_x", 111)
+        self.studio.set_play_variable("first_click_y", 222)
+
+        with patch.object(app.WindowsInput, "move_mouse") as move:
+            self.studio.execute_node(app.MacroNode("move", 0, 0, {"x": "{first_click_x}", "y": "{first_click_y}"}))
+
+        move.assert_called_once_with(111, 222)
+
+    def test_save_clipboard_node_stores_clipboard_variable(self):
+        self.studio.play_context = self.studio.create_play_context()
+        self.studio.clipboard_clear()
+        self.studio.clipboard_append("copied value")
+        self.studio.execute_node(app.MacroNode("save_clipboard", 0, 0, {"variable": "captured"}))
+        self.assertEqual(self.studio.play_context["variables"]["captured"], "copied value")
+
+    def test_save_clipboard_node_appends_dataset_values(self):
+        self.studio.play_context = self.studio.create_play_context()
+        node = app.MacroNode(
+            "save_clipboard",
+            0,
+            0,
+            {"target": "dataset", "dataset": "items", "variable": "clipboard", "file_path": "", "include_blank": "no"},
+        )
+        for value in ("alpha", "beta"):
+            self.studio.clipboard_clear()
+            self.studio.clipboard_append(value)
+            self.studio.execute_node(node)
+
+        self.assertEqual(self.studio.play_context["datasets"]["items"], ["alpha", "beta"])
+        self.assertEqual(self.studio.play_context["variables"]["items"], "alpha\nbeta")
+        self.assertEqual(self.studio.play_context["variables"]["items_count"], 2)
+        self.assertEqual(self.studio.play_context["variables"]["items_last"], "beta")
+        self.assertEqual(self.studio.render_template("{items_count}:{items_last}"), "2:beta")
+
+    def test_save_clipboard_node_skips_blank_values_by_default(self):
+        self.studio.play_context = self.studio.create_play_context()
+        self.studio.clipboard_clear()
+        self.studio.execute_node(app.MacroNode("save_clipboard", 0, 0, {"target": "dataset", "dataset": "items"}))
+        self.assertNotIn("items", self.studio.play_context["datasets"])
+
+    def test_save_clipboard_node_appends_to_file(self):
+        self.studio.play_context = self.studio.create_play_context()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "captures.txt"
+            node = app.MacroNode(
+                "save_clipboard",
+                0,
+                0,
+                {"target": "file", "file_path": str(path), "include_blank": "no"},
+            )
+            for value in ("one", "two"):
+                self.studio.clipboard_clear()
+                self.studio.clipboard_append(value)
+                self.studio.execute_node(node)
+
+            self.assertEqual(path.read_text(encoding="utf-8"), "one\ntwo\n")
+
+    def test_save_mouse_node_stores_coordinates(self):
+        self.studio.play_context = self.studio.create_play_context()
+        with patch.object(app, "get_mouse_position", lambda: (12, 34)):
+            self.studio.execute_node(app.MacroNode("save_mouse", 0, 0, {"variable": "pos"}))
+        self.assertEqual(self.studio.play_context["variables"]["pos_x"], 12)
+        self.assertEqual(self.studio.play_context["variables"]["pos_y"], 34)
+
+    def test_wait_click_node_can_save_click_location(self):
+        class FakeListener:
+            def __init__(self, on_click):
+                self.on_click = on_click
+
+            def start(self):
+                self.on_click(77, 88, "Button.left", True)
+
+            def stop(self):
+                pass
+
+        fake_mouse = type("FakeMouse", (), {"Listener": FakeListener})
+        self.studio.playing = True
+        self.studio.play_context = self.studio.create_play_context()
+
+        with patch.object(app, "mouse", fake_mouse):
+            self.studio.execute_node(
+                app.MacroNode(
+                    "wait_click",
+                    0,
+                    0,
+                    {"button": "left", "timeout": 0, "save_position": "yes", "variable": "first_click"},
+                )
+            )
+
+        self.assertEqual(self.studio.play_context["variables"]["first_click_x"], 77)
+        self.assertEqual(self.studio.play_context["variables"]["first_click_y"], 88)
+        self.assertEqual(self.studio.play_context["variables"]["first_click_button"], "left")
+
     def test_header_logo_is_cropped_and_scaled(self):
         self.assertIsNotNone(self.studio.app_icon)
         self.assertIsNotNone(self.studio.header_logo_image)
-        self.assertLessEqual(max(self.studio.header_logo_image.width(), self.studio.header_logo_image.height()), 60)
+        self.assertLessEqual(max(self.studio.header_logo_image.width(), self.studio.header_logo_image.height()), app.ui(60))
         self.assertGreaterEqual(min(self.studio.header_logo_image.width(), self.studio.header_logo_image.height()), 30)
         if app.Image is not None:
             self.assertIsNotNone(self.studio.app_icon_large)
-            self.assertEqual(max(self.studio.header_logo_image.width(), self.studio.header_logo_image.height()), 44)
+            self.assertEqual(max(self.studio.header_logo_image.width(), self.studio.header_logo_image.height()), app.ui(44))
 
     def test_app_uses_standard_menu_bar_instead_of_recent_toolbar_combo(self):
         buttons = [child for child in self.studio.menu_bar.winfo_children() if child.winfo_class() == "Menubutton"]
@@ -210,6 +382,68 @@ class DataAndUiTests(MacroStudioTestCase):
         self.assertTrue((app.ASSETS_DIR / "macro-logo-300.png").exists())
         self.assertTrue((app.ASSETS_DIR / "macro-logo.svg").exists())
         self.assertEqual(app.MACRO_FILETYPES[0], ("Macro files", "*.macro"))
+
+    def test_script_tabs_show_close_button_and_clean_title_removes_it(self):
+        title = self.studio.doc.tab_title
+        self.assertTrue(title.endswith("  x"))
+        self.assertEqual(app.clean_tab_title(title), self.studio.doc.name)
+
+    def test_clicking_tab_close_button_closes_only_that_tab(self):
+        self.studio.new_macro()
+        second_tab = self.studio.tabs.tabs()[1]
+        self.studio.update()
+        self.studio.update_idletasks()
+        self.studio.draw_tab_bar()
+        close_x1, close_y1, close_x2, close_y2 = self.studio.tab_hit_boxes[0]["close"]
+        event = type("Event", (), {"x": int((close_x1 + close_x2) / 2), "y": int((close_y1 + close_y2) / 2)})()
+
+        with patch.object(self.studio, "confirm_save_if_dirty", lambda doc: True):
+            self.assertEqual(self.studio.on_tab_click(event), "break")
+
+        self.assertEqual(self.studio.tabs.tabs(), (second_tab,))
+
+    def test_clicking_tab_body_does_not_close_tab(self):
+        self.studio.new_macro()
+        self.studio.update()
+        self.studio.update_idletasks()
+        self.studio.draw_tab_bar()
+        body_x1, body_y1, _body_x2, _body_y2 = self.studio.tab_hit_boxes[0]["body"]
+        event = type("Event", (), {"x": body_x1 + 12, "y": body_y1 + 12})()
+
+        self.assertEqual(self.studio.on_tab_click(event), "break")
+        self.assertEqual(len(self.studio.tabs.tabs()), 2)
+
+    def test_tab_close_hit_uses_right_side_of_tab_bbox(self):
+        self.studio.tab_hit_boxes = []
+        with patch.object(self.studio.tabs, "bbox", lambda index: (10, 4, 120, 30)):
+            self.assertTrue(self.studio.tab_close_hit(0, 121, 19))
+            self.assertFalse(self.studio.tab_close_hit(0, 40, 19))
+
+    def test_inspector_actions_use_grid_and_icons(self):
+        buttons = self.studio.inspector_actions.winfo_children()
+        self.assertEqual(len(buttons), 7)
+        self.assertTrue(all(button.grid_info() for button in buttons))
+        icons = [getattr(button, "icon", None) for button in buttons]
+        self.assertNotIn("link", icons)
+        self.assertIn("trash", icons)
+
+    def test_toolbar_run_buttons_have_icons(self):
+        buttons = [
+            child for child in self.studio.winfo_children()[1].winfo_children()
+            if isinstance(child, app.RoundedButton)
+        ]
+        self.assertIn("record", [button.icon for button in buttons])
+        self.assertIn("play", [button.icon for button in buttons])
+        self.assertIn("stop", [button.icon for button in buttons])
+
+    def test_tab_close_hover_tracks_close_button(self):
+        self.studio.draw_tab_bar()
+        close_x1, close_y1, close_x2, close_y2 = self.studio.tab_hit_boxes[0]["close"]
+        event = type("Event", (), {"x": int((close_x1 + close_x2) / 2), "y": int((close_y1 + close_y2) / 2)})()
+        self.studio.on_tab_motion(event)
+        self.assertEqual(self.studio.hover_tab_close, 0)
+        self.studio.on_tab_leave(event)
+        self.assertIsNone(self.studio.hover_tab_close)
 
     def test_custom_menu_buttons_post_dropdowns(self):
         file_button = next(
@@ -271,7 +505,7 @@ class DataAndUiTests(MacroStudioTestCase):
         points = app.cubic_points((0, 0), (0, 10), (10, 10), (10, 20), 4)
         self.assertEqual(points[0], (0, 0))
         self.assertEqual(points[-1], (10, 20))
-        self.assertEqual(app.hex_to_rgba("#42d392"), (66, 211, 146, 255))
+        self.assertEqual(app.hex_to_rgba("#32ff89"), (50, 255, 137, 255))
 
     @unittest.skipIf(app.Image is None, "Pillow is unavailable")
     def test_canvas_uses_antialiased_images_for_edges_and_ports(self):
@@ -299,9 +533,9 @@ class DataAndUiTests(MacroStudioTestCase):
 
         self.studio.doc.edges = []
         self.studio.add_node("global_delay", x=100, y=120, data={"seconds": "0.25"})
-        nodes, loop_count, global_delay = self.studio.playback_nodes_and_count()
+        nodes, loop_settings, global_delay = self.studio.playback_nodes_and_count()
 
-        self.assertEqual(loop_count, 1)
+        self.assertEqual(loop_settings["count"], 1)
         self.assertEqual(global_delay, 0.25)
         self.assertNotIn("global_delay", [node.node_type for node in nodes])
 

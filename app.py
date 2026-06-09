@@ -1,4 +1,5 @@
 import ctypes
+import ctypes.wintypes
 import csv
 import json
 import subprocess
@@ -8,7 +9,7 @@ import tkinter as tk
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font as tkfont, messagebox, ttk
 
 try:
     from PIL import Image, ImageDraw, ImageTk
@@ -27,6 +28,7 @@ except ImportError:
 APP_TITLE = "Macro Studio"
 NODE_W = 202
 NODE_H = 72
+NODE_DISPLAY_SCALE = 1.0
 MACRO_VERSION = 2
 CONFIG_PATH = Path.home() / ".macro_studio.json"
 UI_FONT = "Segoe UI Variable"
@@ -54,6 +56,63 @@ DEFAULT_SETTINGS = {
     "recent_files": [],
 }
 
+
+def set_process_dpi_awareness():
+    if not hasattr(ctypes, "windll"):
+        return
+    try:
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except Exception:
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except Exception:
+        pass
+
+
+def windows_ui_scale():
+    if not hasattr(ctypes, "windll"):
+        return 1.0
+    try:
+        dpi = ctypes.windll.user32.GetDpiForSystem()
+        if dpi > 0:
+            return max(1.0, dpi / 96)
+    except Exception:
+        pass
+    try:
+        dc = ctypes.windll.user32.GetDC(None)
+        if not dc:
+            return 1.0
+        try:
+            dpi = ctypes.windll.gdi32.GetDeviceCaps(dc, 88)
+        finally:
+            ctypes.windll.user32.ReleaseDC(None, dc)
+        if dpi > 0:
+            return max(1.0, dpi / 96)
+    except Exception:
+        pass
+    return 1.0
+
+
+set_process_dpi_awareness()
+UI_SCALE = windows_ui_scale()
+NODE_DISPLAY_SCALE = min(max(UI_SCALE, 1.0), 1.35)
+
+
+def ui(value):
+    return int(round(value * UI_SCALE))
+
+
+def graph_ui(value):
+    return value * NODE_DISPLAY_SCALE
+
+
 THEME = {
     "bg": "#0b1116",
     "panel": "#121b20",
@@ -61,25 +120,25 @@ THEME = {
     "panel_3": "#24343d",
     "line": "#344955",
     "tab_outline": "#3e5663",
-    "line_hot": "#42d392",
+    "line_hot": "#32ff89",
     "text": "#edf4f7",
     "muted": "#9baeba",
-    "success": "#42d392",
+    "success": "#32ff89",
     "warning": "#f0b45b",
-    "error": "#e05b6b",
+    "error": "#ff4f67",
     "info": "#82cfff",
-    "accent": "#42d392",
-    "accent_dark": "#208a5a",
+    "accent": "#32ff89",
+    "accent_dark": "#22c86d",
     "accent_text": "#06130d",
     "node": "#1b2831",
-    "node_selected": "#214f3b",
-    "node_active": "#256547",
-    "node_active_outline": "#64f0aa",
+    "node_selected": "#1f6f4b",
+    "node_active": "#238556",
+    "node_active_outline": "#32ff89",
     "canvas": "#080d12",
     "button": "#24333d",
     "button_hover": "#2d414d",
     "button_shadow": "#0a0f13",
-    "danger": "#b94d5c",
+    "danger": "#d94a5f",
 }
 
 
@@ -204,16 +263,7 @@ class WindowsInput:
 
     @classmethod
     def move_mouse(cls, x, y):
-        screen_w = ctypes.windll.user32.GetSystemMetrics(0)
-        screen_h = ctypes.windll.user32.GetSystemMetrics(1)
-        ax = int(x * 65535 / max(screen_w - 1, 1))
-        ay = int(y * 65535 / max(screen_h - 1, 1))
-        cls._send(
-            Input(
-                cls.INPUT_MOUSE,
-                InputUnion(mi=MouseInput(ax, ay, 0, cls.MOUSEEVENTF_MOVE | cls.MOUSEEVENTF_ABSOLUTE, 0, None)),
-            )
-        )
+        ctypes.windll.user32.SetCursorPos(int(x), int(y))
 
     @classmethod
     def mouse_button(cls, button, pressed):
@@ -255,16 +305,174 @@ def rounded_rect(canvas, x1, y1, x2, y2, radius=8, **kwargs):
     return canvas.create_polygon(points, smooth=True, **kwargs)
 
 
+def rounded_top_rect(canvas, x1, y1, x2, y2, radius=10, **kwargs):
+    radius = min(radius, int((x2 - x1) / 2), int(y2 - y1))
+    points = [
+        x1, y2,
+        x1, y1 + radius,
+        x1, y1,
+        x1 + radius, y1,
+        x2 - radius, y1,
+        x2, y1,
+        x2, y1 + radius,
+        x2, y2,
+    ]
+    return canvas.create_polygon(points, smooth=True, **kwargs)
+
+
+def draw_lucide_icon(canvas, name, x, y, size, color, tags):
+    scale = size / 24
+
+    def point(px, py):
+        return x + px * scale, y + py * scale
+
+    def line(*coords, width=2):
+        scaled = []
+        for idx in range(0, len(coords), 2):
+            scaled.extend(point(coords[idx], coords[idx + 1]))
+        canvas.create_line(*scaled, fill=color, width=max(1, int(width * scale)), capstyle="round", joinstyle="round", tags=tags)
+
+    def rect(px, py, w, h, radius=2):
+        x1, y1 = point(px, py)
+        x2, y2 = point(px + w, py + h)
+        rounded_rect(canvas, x1, y1, x2, y2, max(1, int(radius * scale)), outline=color, fill="", width=max(1, int(2 * scale)), tags=tags)
+
+    if name == "link":
+        line(10, 13, 8.5, 14.5, 7, 16, 5, 16, 3.5, 14.5, 3.5, 12.5, 5, 11, 8, 8, 10, 8)
+        line(14, 11, 15.5, 9.5, 17, 8, 19, 8, 20.5, 9.5, 20.5, 11.5, 19, 13, 16, 16, 14, 16)
+        line(8, 12, 16, 12)
+    elif name == "unlink":
+        line(7, 7, 17, 17)
+        line(10, 13, 8.5, 14.5, 7, 16, 5, 16, 3.5, 14.5, 3.5, 12.5, 5, 11)
+        line(19, 13, 20.5, 11.5, 20.5, 9.5, 19, 8, 17, 8, 15.5, 9.5)
+    elif name == "wand":
+        line(15, 4, 20, 9)
+        line(4, 20, 14, 10)
+        line(6, 4, 6, 8)
+        line(4, 6, 8, 6)
+        line(19, 16, 19, 20)
+        line(17, 18, 21, 18)
+    elif name == "copy":
+        rect(8, 8, 10, 10)
+        rect(5, 5, 10, 10)
+    elif name == "trash":
+        line(3, 6, 21, 6)
+        line(8, 6, 8, 4, 16, 4, 16, 6)
+        line(6, 6, 7, 21, 17, 21, 18, 6)
+        line(10, 11, 10, 17)
+        line(14, 11, 14, 17)
+    elif name == "arrow-up":
+        line(12, 19, 12, 5)
+        line(5, 12, 12, 5, 19, 12)
+    elif name == "arrow-down":
+        line(12, 5, 12, 19)
+        line(5, 12, 12, 19, 19, 12)
+    elif name == "eraser":
+        line(7, 21, 21, 21)
+        line(3, 15, 13, 5, 21, 13, 11, 23, 3, 15)
+        line(11, 7, 19, 15)
+    elif name == "record":
+        x1, y1 = point(6, 6)
+        x2, y2 = point(18, 18)
+        canvas.create_oval(x1, y1, x2, y2, fill=color, outline=color, tags=tags)
+    elif name == "play":
+        coords = []
+        for px, py in ((8, 5), (19, 12), (8, 19)):
+            coords.extend(point(px, py))
+        canvas.create_polygon(coords, fill=color, outline=color, tags=tags)
+    elif name == "stop":
+        x1, y1 = point(7, 7)
+        x2, y2 = point(17, 17)
+        canvas.create_rectangle(x1, y1, x2, y2, fill=color, outline=color, tags=tags)
+
+
+def build_antialiased_icon(name, size, color):
+    if Image is None:
+        return None
+    scale = 5
+    image = Image.new("RGBA", (size * scale, size * scale), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    rgba = hex_to_rgba(color)
+
+    def point(px, py):
+        factor = size * scale / 24
+        return px * factor, py * factor
+
+    def line(*coords, width=2):
+        scaled = []
+        for idx in range(0, len(coords), 2):
+            scaled.extend(point(coords[idx], coords[idx + 1]))
+        draw.line(scaled, fill=rgba, width=max(1, int(width * scale)), joint="curve")
+
+    def rect(px, py, w, h, radius=2, fill=None):
+        x1, y1 = point(px, py)
+        x2, y2 = point(px + w, py + h)
+        draw.rounded_rectangle(
+            (x1, y1, x2, y2),
+            radius=max(1, int(radius * scale)),
+            outline=rgba,
+            fill=rgba if fill else None,
+            width=max(1, int(2 * scale)),
+        )
+
+    if name == "unlink":
+        line(5, 12, 8, 9, 10, 9)
+        line(14, 15, 16, 15, 19, 12)
+        line(7, 7, 17, 17)
+    elif name == "wand":
+        line(4, 20, 15, 9)
+        line(14, 5, 19, 10)
+        line(6, 4, 6, 8)
+        line(4, 6, 8, 6)
+        line(19, 16, 19, 20)
+        line(17, 18, 21, 18)
+    elif name == "copy":
+        rect(8, 8, 10, 10)
+        rect(5, 5, 10, 10)
+    elif name == "trash":
+        line(3, 6, 21, 6)
+        line(8, 6, 8, 4, 16, 4, 16, 6)
+        line(6, 6, 7, 21, 17, 21, 18, 6)
+        line(10, 11, 10, 17)
+        line(14, 11, 14, 17)
+    elif name == "arrow-up":
+        line(12, 19, 12, 5)
+        line(5, 12, 12, 5, 19, 12)
+    elif name == "arrow-down":
+        line(12, 5, 12, 19)
+        line(5, 12, 12, 19, 19, 12)
+    elif name == "eraser":
+        line(7, 21, 21, 21)
+        line(3, 15, 13, 5, 21, 13, 11, 23, 3, 15)
+        line(11, 7, 19, 15)
+    elif name == "record":
+        x1, y1 = point(7, 7)
+        x2, y2 = point(17, 17)
+        draw.ellipse((x1, y1, x2, y2), fill=rgba)
+    elif name == "play":
+        points = [point(8, 5), point(19, 12), point(8, 19)]
+        draw.polygon(points, fill=rgba)
+    elif name == "stop":
+        x1, y1 = point(7, 7)
+        x2, y2 = point(17, 17)
+        draw.rounded_rectangle((x1, y1, x2, y2), radius=max(1, int(1.5 * scale)), fill=rgba)
+    else:
+        line(10, 13, 8.5, 14.5, 7, 16, 5, 16, 3.5, 14.5, 3.5, 12.5, 5, 11, 8, 8, 10, 8)
+        line(14, 11, 15.5, 9.5, 17, 8, 19, 8, 20.5, 9.5, 20.5, 11.5, 19, 13, 16, 16, 14, 16)
+    image = image.resize((size, size), Image.Resampling.LANCZOS)
+    return ImageTk.PhotoImage(image)
+
+
 class RoundedButton(tk.Canvas):
-    def __init__(self, parent, text, command, width=118, height=40, accent=False, danger=False):
+    def __init__(self, parent, text, command, width=118, height=40, accent=False, danger=False, icon=None):
         try:
             parent_bg = parent.cget("bg")
         except tk.TclError:
             parent_bg = THEME["panel"]
         super().__init__(
             parent,
-            width=width,
-            height=height + 4,
+            width=ui(width),
+            height=ui(height + 4),
             bg=parent_bg,
             highlightthickness=0,
             bd=0,
@@ -272,10 +480,12 @@ class RoundedButton(tk.Canvas):
         )
         self.text = text
         self.command = command
-        self.width_px = width
-        self.height_px = height
+        self.icon = icon
+        self.icon_image = None
+        self.width_px = ui(width)
+        self.height_px = ui(height)
         self.fill = THEME["accent_dark"] if accent else THEME["danger"] if danger else THEME["button"]
-        self.hover_fill = THEME["accent"] if accent else "#c2606e" if danger else THEME["button_hover"]
+        self.hover_fill = THEME["accent"] if accent else "#ff5f74" if danger else THEME["button_hover"]
         self.text_fill = THEME["accent_text"] if accent else THEME["text"]
         self.draw(self.fill)
         self.bind("<Enter>", lambda _event: self.draw(self.hover_fill))
@@ -285,10 +495,21 @@ class RoundedButton(tk.Canvas):
 
     def draw(self, fill):
         self.delete("all")
-        rounded_rect(self, 3, 5, self.width_px - 1, self.height_px + 2, 7, fill=THEME["button_shadow"], outline="", tags="button")
-        rounded_rect(self, 1, 1, self.width_px - 3, self.height_px - 1, 7, fill=fill, outline="#334751", tags="button")
+        rounded_rect(self, ui(3), ui(5), self.width_px - ui(1), self.height_px + ui(2), ui(7), fill=THEME["button_shadow"], outline="", tags="button")
+        rounded_rect(self, ui(1), ui(1), self.width_px - ui(3), self.height_px - ui(1), ui(7), fill=fill, outline="#334751", tags="button")
+        text_x = int(self.width_px / 2) - 1
+        if self.icon:
+            icon_size = ui(18)
+            icon_x = max(ui(10), text_x - ui(48))
+            icon_y = int((self.height_px - icon_size) / 2)
+            self.icon_image = build_antialiased_icon(self.icon, icon_size, self.text_fill)
+            if self.icon_image:
+                self.create_image(icon_x, icon_y, image=self.icon_image, anchor="nw", tags="button")
+            else:
+                draw_lucide_icon(self, self.icon, icon_x, icon_y, icon_size, self.text_fill, "button")
+            text_x += 10
         self.create_text(
-            int(self.width_px / 2) - 1,
+            text_x,
             int(self.height_px / 2),
             text=self.text,
             fill=self.text_fill,
@@ -312,12 +533,13 @@ class Tooltip:
         widget.bind("<Enter>", self.schedule, add="+")
         widget.bind("<Leave>", self.hide, add="+")
         widget.bind("<ButtonPress>", self.hide, add="+")
+        widget.bind("<Destroy>", self.cancel, add="+")
 
     def schedule(self, _event=None):
         self.cancel()
         self.after_id = self.widget.after(self.delay, self.show)
 
-    def cancel(self):
+    def cancel(self, _event=None):
         if self.after_id:
             self.widget.after_cancel(self.after_id)
             self.after_id = None
@@ -360,8 +582,8 @@ class ScrollableFrame(ttk.Frame):
             bg=THEME["panel"],
             highlightthickness=0,
             bd=0,
-            height=height or 1,
-            width=width or 1,
+            height=ui(height) if height else 1,
+            width=ui(width) if width else 1,
         )
         self.inner = ttk.Frame(self.canvas, style=style)
         self.window_id = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
@@ -433,6 +655,21 @@ def get_active_window_title():
         return ""
 
 
+def get_mouse_position():
+    try:
+        point = ctypes.wintypes.POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(point))
+        return int(point.x), int(point.y)
+    except Exception:
+        if mouse is not None:
+            try:
+                x, y = mouse.Controller().position
+                return int(x), int(y)
+            except Exception:
+                pass
+    return 0, 0
+
+
 def recorded_event_label(event):
     kind = event.get("kind")
     if kind == "move_path":
@@ -480,15 +717,17 @@ class MacroDocument:
 NODE_TYPES = {
     "start": {"title": "Start", "defaults": {}, "description": "Workflow entry point. Playback starts here when the script has graph connections."},
     "end": {"title": "End", "defaults": {}, "description": "Workflow stop point. Playback stops this path when it reaches this node."},
-    "loop": {"title": "Loop Script", "defaults": {"count": 3}, "description": "Repeats the active script a fixed number of times. The loop node itself is skipped during playback and acts as a script-level repeat setting."},
+    "loop": {"title": "Loop Script", "defaults": {"mode": "count", "count": 3, "stop_hotkey": ""}, "description": "Repeats the active script a fixed number of times, or runs until a stop hotkey is pressed. The loop node itself is skipped during playback."},
     "global_delay": {"title": "Global Delay", "defaults": {"seconds": 0.1}, "description": "Adds a pause between every playback node in the script. This node acts as a script-level timing setting."},
     "counter": {"title": "Counter", "defaults": {"name": "counter", "start": 1, "step": 1}, "description": "Tracks a named number while playback runs. Use placeholders like {counter} in Type Text, Set Clipboard, or Paste data values."},
     "delay": {"title": "Delay", "defaults": {"seconds": 0.5}, "description": "Pauses playback for a number of seconds. Useful between clicks, launches, and pages that need time to load."},
     "wait_window": {"title": "Wait Window", "defaults": {"title_contains": "", "timeout": 10}, "description": "Waits until the active window title contains specific text, or until the timeout expires."},
     "wait_hotkey": {"title": "Wait Hotkey", "defaults": {"hotkey": "<ctrl>+<shift>+space", "timeout": 0}, "description": "Pauses playback until a specific hotkey is pressed. Set timeout to 0 to wait indefinitely."},
+    "wait_click": {"title": "Wait Click", "defaults": {"button": "any", "timeout": 0, "save_position": "yes", "variable": "first_click"}, "description": "Pauses playback until you manually click. The click passes through normally and can save its screen position into variables."},
     "note": {"title": "Note", "defaults": {"text": "Describe this part of the workflow"}, "description": "A documentation node. It is ignored during playback and helps explain larger workflows."},
     "click": {"title": "Mouse Click", "defaults": {"button": "left", "x": 500, "y": 500}, "description": "Moves the mouse to a screen coordinate and clicks a button. Coordinates are absolute screen pixels."},
     "move": {"title": "Mouse Move", "defaults": {"x": 500, "y": 500}, "description": "Moves the mouse pointer to a screen coordinate without clicking."},
+    "save_mouse": {"title": "Save Mouse Position", "defaults": {"variable": "mouse"}, "description": "Saves the current mouse coordinates into variables like mouse_x and mouse_y."},
     "scroll": {"title": "Scroll", "defaults": {"direction": "down", "amount": 3}, "description": "Scrolls the mouse wheel up or down by a chosen amount. The mouse stays wherever it currently is."},
     "key": {"title": "Key Tap", "defaults": {"key": "enter"}, "description": "Presses and releases a single key such as enter, tab, esc, delete, or an arrow key."},
     "hotkey": {"title": "Hotkey", "defaults": {"keys": "ctrl+c", "custom_keys": ""}, "description": "Presses a key combination. Choose a common hotkey or set keys to custom and enter your own combo in custom_keys."},
@@ -497,6 +736,7 @@ NODE_TYPES = {
     "cut": {"title": "Cut", "defaults": {}, "description": "Runs Ctrl+X in the focused app."},
     "paste": {"title": "Paste", "defaults": {"source": "clipboard", "data": "", "file_path": "", "column": 1}, "description": "Pastes from the current clipboard, inline rows, or a CSV/TSV file. Data sources advance one item per paste, which pairs well with Loop Script."},
     "clipboard": {"title": "Set Clipboard", "defaults": {"text": "Clipboard text"}, "description": "Sets the clipboard text without immediately pasting. Supports placeholders for loops and counters."},
+    "save_clipboard": {"title": "Save Clipboard", "defaults": {"target": "variable", "variable": "clipboard", "dataset": "captured_items", "file_path": "", "include_blank": "no"}, "description": "Saves current clipboard text to a variable, appends it to an in-memory dataset, or appends it to a text file."},
     "launch": {"title": "Launch App", "defaults": {"command": "notepad"}, "description": "Starts an app or command, such as notepad or a full executable path."},
     "recorded": {"title": "Recorded Event", "defaults": {"event": {}}, "description": "A captured mouse, keyboard, scroll, or grouped mouse-path event created by the recorder."},
 }
@@ -504,6 +744,8 @@ NODE_TYPES = {
 FIELD_DESCRIPTIONS = {
     "_label": "Optional display name for this node. Leaving it as the default keeps the standard node title.",
     "count": "How many times to run the active script. Minimum is 1.",
+    "mode": "Loop behavior. Use count for fixed repeats or until hotkey for unknown repetition counts.",
+    "stop_hotkey": "Optional hotkey that stops an until-hotkey loop. Leave blank to use the app Stop hotkey from Settings.",
     "name": "Counter name. Use the same name in placeholders, for example {counter}.",
     "start": "Initial counter value before the first step is applied.",
     "step": "How much the counter changes each time this node runs.",
@@ -520,6 +762,11 @@ FIELD_DESCRIPTIONS = {
     "keys": "Hotkey combination separated by plus signs, such as ctrl+c or ctrl+shift+s.",
     "custom_keys": "Custom hotkey combination used when keys is set to custom, such as ctrl+shift+a.",
     "text": "Text value. Supports placeholders like {iteration}, {loop_count}, and named counters.",
+    "variable": "Variable base name. Values are available later as placeholders, such as {first_click_x}, {first_click_y}, or {clipboard}.",
+    "target": "Where to save clipboard text: a variable, a playback dataset, or a file.",
+    "dataset": "Dataset name used for collected values. Appended items are available as {dataset}, {dataset_count}, and {dataset_last}.",
+    "include_blank": "Whether blank clipboard values should be saved.",
+    "save_position": "Whether this node should save the clicked screen coordinate into variables.",
     "source": "Paste source: clipboard uses current clipboard, data uses rows in this node, file reads CSV/TSV.",
     "data": "Inline paste rows. You can paste a copied Excel column/table here; the column setting chooses which column to use.",
     "file_path": "Path to a CSV or TSV file. Use with source=file.",
@@ -529,19 +776,24 @@ FIELD_DESCRIPTIONS = {
 }
 
 FIELD_OPTIONS = {
+    ("loop", "mode"): ["count", "until hotkey"],
     ("click", "button"): ["left", "right", "middle"],
+    ("wait_click", "button"): ["any", "left", "right", "middle"],
+    ("wait_click", "save_position"): ["yes", "no"],
     ("hotkey", "keys"): ["ctrl+c", "ctrl+v", "ctrl+x", "ctrl+a", "ctrl+z", "ctrl+s", "alt+tab", "custom"],
     ("key", "key"): ["enter", "tab", "esc", "space", "backspace", "delete", "left", "right", "up", "down"],
     ("scroll", "direction"): ["down", "up"],
     ("paste", "source"): ["clipboard", "data", "file"],
+    ("save_clipboard", "target"): ["variable", "dataset", "file"],
+    ("save_clipboard", "include_blank"): ["no", "yes"],
 }
 
 NODE_CATEGORIES = [
     ("Flow", ["start", "end", "loop", "counter", "note"]),
-    ("Timing", ["global_delay", "delay", "wait_window", "wait_hotkey"]),
-    ("Mouse", ["click", "move", "scroll"]),
+    ("Timing", ["global_delay", "delay", "wait_window", "wait_hotkey", "wait_click"]),
+    ("Mouse", ["click", "move", "save_mouse", "scroll"]),
     ("Keyboard", ["key", "hotkey", "type"]),
-    ("Clipboard", ["copy", "cut", "paste", "clipboard"]),
+    ("Clipboard", ["copy", "cut", "paste", "clipboard", "save_clipboard"]),
     ("System", ["launch"]),
 ]
 
@@ -553,12 +805,15 @@ class MacroStudio(tk.Tk):
         self.app_icon = None
         self.app_icon_large = None
         self.header_logo_image = None
-        self.geometry("1260x800")
-        self.minsize(1040, 660)
+        self.geometry(f"{ui(1260)}x{ui(800)}")
+        self.minsize(ui(1040), ui(660))
         self.configure(bg=THEME["bg"])
         self.settings = self.load_settings()
         self.documents = []
         self.tab_to_doc = {}
+        self.tab_hit_boxes = []
+        self.tab_image_refs = []
+        self.hover_tab_close = None
         self.untitled_counter = 0
         self.node_items = {}
         self.port_items = {}
@@ -583,6 +838,7 @@ class MacroStudio(tk.Tk):
         self.active_node_id = None
         self.listeners = []
         self.hotkey_listener = None
+        self.playback_stop_listener = None
         self._style_ui()
         self.load_app_icon()
         self._build_ui()
@@ -752,9 +1008,9 @@ class MacroStudio(tk.Tk):
                 if Image is not None:
                     source = Image.open(icon_path).convert("RGBA")
                     cropped = self.crop_pillow_transparent_padding(source)
-                    self.header_logo_image = ImageTk.PhotoImage(self.resize_pillow_logo(cropped, 44))
-                    self.app_icon = ImageTk.PhotoImage(self.resize_pillow_logo(cropped, 32))
-                    self.app_icon_large = ImageTk.PhotoImage(self.resize_pillow_logo(cropped, 64))
+                    self.header_logo_image = ImageTk.PhotoImage(self.resize_pillow_logo(cropped, ui(44)))
+                    self.app_icon = ImageTk.PhotoImage(self.resize_pillow_logo(cropped, ui(32)))
+                    self.app_icon_large = ImageTk.PhotoImage(self.resize_pillow_logo(cropped, ui(64)))
                     self.iconphoto(True, self.app_icon, self.app_icon_large)
                 else:
                     self.app_icon = tk.PhotoImage(file=icon_path)
@@ -784,7 +1040,7 @@ class MacroStudio(tk.Tk):
 
     def prepare_header_logo(self, image):
         cropped = self.crop_transparent_padding(image)
-        target = 44
+        target = ui(44)
         max_dim = max(cropped.width(), cropped.height())
         scale = max(1, max_dim // target)
         return cropped.subsample(scale, scale)
@@ -839,9 +1095,9 @@ class MacroStudio(tk.Tk):
         self.script_status_label.pack(side="left", padx=(0, 12))
         self.status = tk.StringVar(value="Ready")
         self.status.trace_add("write", lambda *_args: self.update_status_color())
-        RoundedButton(toolbar, text="Stop", command=self.stop_all, width=88).pack(side="right", padx=(4, 0))
-        RoundedButton(toolbar, text="Play", command=self.play_macro, width=88, accent=True).pack(side="right", padx=4)
-        RoundedButton(toolbar, text="Record", command=self.toggle_recording, width=88, accent=True).pack(side="right", padx=4)
+        RoundedButton(toolbar, text="Stop", command=self.stop_all, width=96, icon="stop").pack(side="right", padx=(4, 0))
+        RoundedButton(toolbar, text="Play", command=self.play_macro, width=96, accent=True, icon="play").pack(side="right", padx=4)
+        RoundedButton(toolbar, text="Record", command=self.toggle_recording, width=108, accent=True, icon="record").pack(side="right", padx=4)
         self.status_label = tk.Label(toolbar, textvariable=self.status, bg=THEME["panel"], fg=THEME["muted"], font=(UI_FONT, 10))
         self.status_label.pack(side="right", padx=(10, 12))
         self.update_status_color()
@@ -861,11 +1117,22 @@ class MacroStudio(tk.Tk):
         center.grid(row=2, column=1, sticky="nsew")
         center.columnconfigure(0, weight=1)
         center.rowconfigure(1, weight=1)
+        self.tab_bar = tk.Canvas(
+            center,
+            height=ui(50),
+            bg=THEME["panel"],
+            highlightthickness=0,
+            bd=0,
+            cursor="hand2",
+        )
+        self.tab_bar.grid(row=0, column=0, sticky="ew", padx=(8, 8), pady=(8, 0))
+        self.tab_bar.bind("<Configure>", lambda _event: self.draw_tab_bar())
+        self.tab_bar.bind("<ButtonRelease-1>", self.on_tab_click)
+        self.tab_bar.bind("<Motion>", self.on_tab_motion)
+        self.tab_bar.bind("<Leave>", self.on_tab_leave)
         self.tabs = ttk.Notebook(center)
         self.tabs.configure(takefocus=False)
-        self.tabs.grid(row=0, column=0, sticky="ew", padx=(8, 8), pady=(8, 0))
         self.tabs.bind("<<NotebookTabChanged>>", lambda _event: self.refresh())
-        self.tabs.bind("<ButtonRelease-1>", self.on_tab_click, add="+")
 
         canvas_shell = ttk.Frame(center, style="Panel.TFrame")
         canvas_shell.grid(row=1, column=0, sticky="nsew", padx=(8, 8), pady=(0, 8))
@@ -905,18 +1172,23 @@ class MacroStudio(tk.Tk):
         ttk.Label(props, text="Edit the selected action", style="Muted.TLabel").pack(anchor="w", pady=(0, 10))
         self.inspector_body = ttk.Frame(props, style="Panel.TFrame")
         self.inspector_body.pack(fill="both", expand=True, pady=4)
-        for text, command, danger in [
-            ("Connect From", self.begin_connection_from_selected, False),
-            ("Connect To", self.connect_pending_to_selected, False),
-            ("Unlink Node", self.unlink_selected, False),
-            ("Auto Link", self.auto_link_nodes, False),
-            ("Duplicate", self.duplicate_selected, False),
-            ("Delete Node", self.delete_selected, True),
-            ("Move Up", lambda: self.move_selected(-1), False),
-            ("Move Down", lambda: self.move_selected(1), False),
-            ("Clear Script", self.clear_nodes, True),
-        ]:
-            RoundedButton(props, text=text, command=command, width=260, height=38, danger=danger).pack(fill="x", pady=3)
+        self.inspector_actions = ttk.Frame(props, style="Panel.TFrame")
+        self.inspector_actions.pack(fill="x", pady=(6, 0))
+        for column in range(2):
+            self.inspector_actions.columnconfigure(column, weight=1)
+        for idx, (text, command, danger, icon) in enumerate([
+            ("Auto Link", self.auto_link_nodes, False, "wand"),
+            ("Unlink", self.unlink_selected, False, "unlink"),
+            ("Duplicate", self.duplicate_selected, False, "copy"),
+            ("Delete", self.delete_selected, True, "trash"),
+            ("Move Up", lambda: self.move_selected(-1), False, "arrow-up"),
+            ("Move Down", lambda: self.move_selected(1), False, "arrow-down"),
+            ("Clear", self.clear_nodes, True, "eraser"),
+        ]):
+            span = 2 if idx == 6 else 1
+            width = 260 if span == 2 else 126
+            button = RoundedButton(self.inspector_actions, text=text, command=command, width=width, height=38, danger=danger, icon=icon)
+            button.grid(row=int(idx / 2), column=idx % 2, columnspan=span, sticky="ew", padx=3, pady=3)
         self.update_recent_menu()
 
     def build_menu_bar(self):
@@ -1122,6 +1394,7 @@ class MacroStudio(tk.Tk):
         current = self.tabs.select()
         if current:
             self.tabs.tab(current, text=self.doc.tab_title)
+        self.draw_tab_bar()
         if hasattr(self, "script_status"):
             self.script_status.set("Unsaved changes" if self.doc.dirty else "Saved")
             self.update_script_status_color()
@@ -1154,21 +1427,150 @@ class MacroStudio(tk.Tk):
             return THEME["info"]
         return THEME["muted"]
 
+    def draw_tab_bar(self):
+        if not hasattr(self, "tab_bar"):
+            return
+        self.tab_bar.delete("all")
+        self.tab_hit_boxes = []
+        self.tab_image_refs = []
+        tabs = self.tabs.tabs() if hasattr(self, "tabs") else []
+        selected_tab = self.tabs.select() if tabs else ""
+        width = max(self.tab_bar.winfo_width(), 1)
+        self.tab_bar.create_rectangle(0, 0, width, ui(50), fill=THEME["panel"], outline="")
+        x = 0
+        tab_font = tkfont.Font(font=(UI_FONT, 10, "bold"))
+        for index, tab_id in enumerate(tabs):
+            doc = self.tab_to_doc.get(tab_id)
+            if not doc:
+                continue
+            selected = tab_id == selected_tab
+            label = clean_tab_title(doc.tab_title)
+            text_width = tab_font.measure(label)
+            tab_w = max(ui(132 if selected else 112), min(ui(230), text_width + ui(62)))
+            tab_h = ui(42 if selected else 36)
+            y = ui(4 if selected else 10)
+            fill = THEME["accent_dark"] if selected else THEME["panel_2"]
+            outline = THEME["accent"] if selected else THEME["tab_outline"]
+            self.draw_antialiased_tab(x, y, tab_w, tab_h, ui(10), fill, outline, ui(2 if selected else 1))
+            text_fill = THEME["accent_text"] if selected else THEME["muted"]
+            self.tab_bar.create_text(
+                x + ui(20),
+                y + int(tab_h / 2),
+                text=label,
+                fill=text_fill,
+                font=(UI_FONT, 10, "bold" if selected else "normal"),
+                anchor="w",
+            )
+            close_x = x + tab_w - ui(22)
+            close_y = y + int(tab_h / 2)
+            close_box = (close_x - ui(11), close_y - ui(11), close_x + ui(11), close_y + ui(11))
+            close_hovered = self.hover_tab_close == index
+            close_fill = THEME["panel_3"] if selected else THEME["panel"]
+            close_text = THEME["error"] if close_hovered else THEME["text"]
+            rounded_rect(self.tab_bar, *close_box, ui(8), fill=close_fill, outline=THEME["error"] if close_hovered else THEME["line"], tags=("tab-close",))
+            self.tab_bar.create_text(close_x, close_y - ui(1), text="x", fill=close_text, font=(UI_FONT, 10, "bold"), tags=("tab-close",))
+            self.tab_hit_boxes.append(
+                {
+                    "index": index,
+                    "body": (x, y, x + tab_w, y + tab_h),
+                    "close": close_box,
+                }
+            )
+            x += tab_w + ui(2)
+        self.tab_bar.create_line(0, ui(48), width, ui(48), fill=THEME["line"], width=max(1, ui(1)))
+
+    def draw_antialiased_tab(self, x, y, w, h, radius, fill, outline, width=1):
+        if Image is None:
+            return rounded_top_rect(self.tab_bar, x, y, x + w, y + h, radius, fill=fill, outline=outline, width=width)
+        scale = 3
+        image_w = max(1, int(w))
+        image_h = max(1, int(h))
+        image = Image.new("RGBA", (image_w * scale, image_h * scale), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        fill_rgba = hex_to_rgba(fill)
+        outline_rgba = hex_to_rgba(outline)
+        r = max(1, int(radius * scale))
+        stroke = max(1, int(width * scale))
+        bbox = (0, 0, image.width - 1, image.height + r)
+        draw.rounded_rectangle(bbox, radius=r, fill=fill_rgba)
+        draw.rectangle((0, r, image.width, image.height), fill=fill_rgba)
+        draw.line((r, stroke // 2, image.width - r, stroke // 2), fill=outline_rgba, width=stroke)
+        draw.arc((0, 0, r * 2, r * 2), 180, 270, fill=outline_rgba, width=stroke)
+        draw.arc((image.width - r * 2, 0, image.width, r * 2), 270, 360, fill=outline_rgba, width=stroke)
+        draw.line((stroke // 2, r, stroke // 2, image.height), fill=outline_rgba, width=stroke)
+        draw.line((image.width - stroke // 2, r, image.width - stroke // 2, image.height), fill=outline_rgba, width=stroke)
+        draw.line((0, image.height - stroke // 2, image.width, image.height - stroke // 2), fill=outline_rgba, width=stroke)
+        image = image.resize((image_w, image_h), Image.Resampling.LANCZOS)
+        photo = ImageTk.PhotoImage(image)
+        self.tab_image_refs.append(photo)
+        return self.tab_bar.create_image(x, y, image=photo, anchor="nw")
+
+    def on_tab_motion(self, event):
+        hovered = None
+        for box in getattr(self, "tab_hit_boxes", []):
+            x1, y1, x2, y2 = box["close"]
+            if x1 <= event.x <= x2 and y1 <= event.y <= y2:
+                hovered = box["index"]
+                break
+        if hovered != self.hover_tab_close:
+            self.hover_tab_close = hovered
+            self.draw_tab_bar()
+
+    def on_tab_leave(self, _event):
+        if self.hover_tab_close is not None:
+            self.hover_tab_close = None
+            self.draw_tab_bar()
+
     def on_tab_click(self, event):
-        try:
-            index = self.tabs.index(f"@{event.x},{event.y}")
-            bbox = self.tabs.bbox(index)
-        except tk.TclError:
+        index = self.tab_index_at(event.x, event.y)
+        if index is None:
             return
-        if not bbox:
-            return
-        close_x1 = bbox[0] + bbox[2] - 16
-        close_x2 = bbox[0] + bbox[2] - 4
-        close_y1 = bbox[1] + 5
-        close_y2 = bbox[1] + bbox[3] - 5
-        if close_x1 <= event.x <= close_x2 and close_y1 <= event.y <= close_y2:
+        if self.tab_close_hit(index, event.x, event.y):
             self.close_tab(index)
             return "break"
+        tabs = self.tabs.tabs()
+        if 0 <= index < len(tabs):
+            self.tabs.select(tabs[index])
+            self.refresh()
+            return "break"
+
+    def tab_index_at(self, x, y):
+        for box in getattr(self, "tab_hit_boxes", []):
+            x1, y1, x2, y2 = box["body"]
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                return box["index"]
+        try:
+            return self.tabs.index(f"@{x},{y}")
+        except tk.TclError:
+            pass
+        for index in range(len(self.tabs.tabs())):
+            bbox = self.tabs.bbox(index)
+            if not bbox:
+                continue
+            tab_x, tab_y, tab_w, tab_h = bbox
+            if tab_x <= x <= tab_x + tab_w and tab_y <= y <= tab_y + tab_h:
+                return index
+        return None
+
+    def tab_close_hit(self, index, x, y):
+        for box in getattr(self, "tab_hit_boxes", []):
+            if box["index"] != index:
+                continue
+            x1, y1, x2, y2 = box["close"]
+            return x1 <= x <= x2 and y1 <= y <= y2
+        try:
+            bbox = self.tabs.bbox(index)
+        except tk.TclError:
+            return False
+        if not bbox:
+            return False
+        tab_x, tab_y, tab_w, tab_h = bbox
+        close_size = min(18, max(12, tab_h - 8))
+        close_x1 = tab_x + tab_w - close_size - 5
+        close_x2 = tab_x + tab_w - 4
+        close_y1 = tab_y + max(3, int((tab_h - close_size) / 2))
+        close_y2 = close_y1 + close_size
+        return close_x1 <= x <= close_x2 and close_y1 <= y <= close_y2
 
     def close_tab(self, index=None):
         if not self.tabs.tabs():
@@ -1214,6 +1616,12 @@ class MacroStudio(tk.Tk):
 
     def from_screen(self, value):
         return value / self.zoom
+
+    def node_display_w(self):
+        return graph_ui(NODE_W)
+
+    def node_display_h(self):
+        return graph_ui(NODE_H)
 
     def zoom_in(self):
         self.set_zoom(self.zoom * 1.15)
@@ -1318,9 +1726,11 @@ class MacroStudio(tk.Tk):
             elif source == self.selected:
                 color = THEME["accent"]
                 width = 3
-            x1 = self.to_screen(source.x + NODE_W / 2)
-            y1 = self.to_screen(source.y + NODE_H)
-            x2 = self.to_screen(target.x + NODE_W / 2)
+            node_w = self.node_display_w()
+            node_h = self.node_display_h()
+            x1 = self.to_screen(source.x + node_w / 2)
+            y1 = self.to_screen(source.y + node_h)
+            x2 = self.to_screen(target.x + node_w / 2)
             y2 = self.to_screen(target.y)
             self.draw_edge_curve(x1, y1, x2, y2, color, max(1, int(width * self.zoom)))
 
@@ -1388,8 +1798,8 @@ class MacroStudio(tk.Tk):
         max_x = WORKSPACE_MIN_W
         max_y = WORKSPACE_MIN_H
         for node in self.nodes:
-            max_x = max(max_x, node.x + NODE_W + 300)
-            max_y = max(max_y, node.y + NODE_H + 300)
+            max_x = max(max_x, node.x + self.node_display_w() + 300)
+            max_y = max(max_y, node.y + self.node_display_h() + 300)
         width = max(self.to_screen(max_x), viewport_w)
         height = max(self.to_screen(max_y), viewport_h)
         self.canvas.configure(scrollregion=(0, 0, width, height))
@@ -1406,8 +1816,8 @@ class MacroStudio(tk.Tk):
     def draw_node(self, node):
         x = self.to_screen(node.x)
         y = self.to_screen(node.y)
-        w = self.to_screen(NODE_W)
-        h = self.to_screen(NODE_H)
+        w = self.to_screen(self.node_display_w())
+        h = self.to_screen(self.node_display_h())
         active = node.node_id == self.active_node_id
         fill = THEME["node_active"] if active else THEME["node_selected"] if node == self.selected else THEME["node"]
         outline = THEME["node_active_outline"] if active else THEME["line_hot"] if node == self.selected else THEME["line"]
@@ -1418,10 +1828,10 @@ class MacroStudio(tk.Tk):
         self.draw_antialiased_round_rect(x, y, self.to_screen(8), h, radius, THEME["accent"], THEME["accent"])
         rect = self.canvas.create_rectangle(x, y, x + w, y + h, fill="", outline="", width=0)
         self.draw_ports(node, x, y, w, h)
-        title = self.canvas.create_text(x + self.to_screen(16), y + self.to_screen(12), text=node.title, fill=THEME["text"], anchor="nw", font=(UI_FONT, max(7, int(10 * self.zoom)), "bold"))
+        title = self.canvas.create_text(x + self.to_screen(graph_ui(16)), y + self.to_screen(graph_ui(12)), text=node.title, fill=THEME["text"], anchor="nw", font=(UI_FONT, max(7, int(10 * self.zoom)), "bold"))
         detail = None
         if self.zoom >= 0.72:
-            detail = self.canvas.create_text(x + self.to_screen(16), y + self.to_screen(38), text=self.node_summary(node), fill=THEME["muted"], anchor="nw", font=(UI_FONT, max(8, int(9 * self.zoom))), width=max(80, self.to_screen(NODE_W - 28)))
+            detail = self.canvas.create_text(x + self.to_screen(graph_ui(16)), y + self.to_screen(graph_ui(38)), text=self.node_summary(node), fill=THEME["muted"], anchor="nw", font=(UI_FONT, max(8, int(9 * self.zoom))), width=max(80, self.to_screen(self.node_display_w() - graph_ui(28))))
         self.node_items[rect] = node
         self.node_items[title] = node
         if detail:
@@ -1449,7 +1859,7 @@ class MacroStudio(tk.Tk):
         return self.canvas.create_image(x, y, image=photo, anchor="nw")
 
     def draw_ports(self, node, x, y, w, h):
-        r = max(5, int(7 * self.zoom))
+        r = max(5, int(graph_ui(7) * self.zoom))
         input_x = x + w / 2
         input_y = y
         output_x = x + w / 2
@@ -1497,7 +1907,10 @@ class MacroStudio(tk.Tk):
                 return f"{event.get('key', 'key')} +{event.get('delay', 0):.2f}s"
             return f"{event.get('kind', 'event')} +{event.get('delay', 0):.2f}s"
         if node.node_type == "loop":
-            return f"run script {node.data.get('count', 1)} times"
+            settings = self.loop_settings(node)
+            if settings["mode"] == "until hotkey":
+                return f"until {settings.get('stop_hotkey', 'stop hotkey')}"
+            return f"run script {settings['count']} times"
         if node.node_type == "paste" and node.data.get("source") != "clipboard":
             source = node.data.get("source")
             if source == "data":
@@ -1505,6 +1918,19 @@ class MacroStudio(tk.Tk):
             else:
                 count = "file"
             return f"paste from {source}: {count} items"
+        if node.node_type == "wait_click":
+            variable = node.data.get("variable", "first_click")
+            save = str(node.data.get("save_position", "yes")).lower() == "yes"
+            return f"save to {variable}_x/y" if save else "continue after manual click"
+        if node.node_type == "save_mouse":
+            return f"save to {node.data.get('variable', 'mouse')}_x/y"
+        if node.node_type == "save_clipboard":
+            target = node.data.get("target", "variable")
+            if target == "dataset":
+                return f"append to {node.data.get('dataset', 'captured_items')}"
+            if target == "file":
+                return "append to file"
+            return f"save to {{{node.data.get('variable', 'clipboard')}}}"
         visible_items = [(k, v) for k, v in node.data.items() if not k.startswith("_")]
         summary = ", ".join(f"{k}: {v}" for k, v in visible_items) or "No settings"
         return summary[:68] + "..." if len(summary) > 71 else summary
@@ -1519,7 +1945,7 @@ class MacroStudio(tk.Tk):
             self.connection_drag = {
                 "source": node,
                 "line": None,
-                "start": (self.to_screen(node.x + NODE_W / 2), self.to_screen(node.y + NODE_H)),
+                "start": (self.to_screen(node.x + self.node_display_w() / 2), self.to_screen(node.y + self.node_display_h())),
             }
             self.drag = None
             self.drag_moved = False
@@ -2005,6 +2431,7 @@ class MacroStudio(tk.Tk):
         self.playing = False
         if self.recording:
             self.stop_recording()
+        self.stop_playback_stop_listener()
         self.status.set("Stopped")
 
     def recorded_delay(self):
@@ -2089,6 +2516,8 @@ class MacroStudio(tk.Tk):
     def create_play_context(self):
         return {
             "counters": {},
+            "variables": {},
+            "datasets": {},
             "paste_index": 0,
             "paste_cache": {},
         }
@@ -2098,15 +2527,29 @@ class MacroStudio(tk.Tk):
         if not ordered:
             ordered = sorted(self.nodes, key=lambda n: (n.y, n.x))
         loop_nodes = [node for node in ordered if node.node_type == "loop"]
-        count = 1
+        loop_settings = {"mode": "count", "count": 1, "stop_hotkey": ""}
         if loop_nodes:
-            count = max(1, safe_int(loop_nodes[0].data.get("count", 1), 1))
+            loop_settings = self.loop_settings(loop_nodes[0])
         global_delay_nodes = [node for node in ordered if node.node_type == "global_delay"]
         global_delay = 0
         if global_delay_nodes:
             global_delay = max(0, safe_float(global_delay_nodes[0].data.get("seconds", 0), 0))
         script_level_nodes = {"loop", "global_delay"}
-        return [node for node in ordered if node.node_type not in script_level_nodes], count, global_delay
+        return [node for node in ordered if node.node_type not in script_level_nodes], loop_settings, global_delay
+
+    def loop_settings(self, node):
+        mode = str(node.data.get("mode", "count")).lower()
+        if mode in ("until hotkey", "until_hotkey", "hotkey"):
+            return {
+                "mode": "until hotkey",
+                "count": None,
+                "stop_hotkey": str(node.data.get("stop_hotkey", "")).strip() or self.settings.get("stop_hotkey", ""),
+            }
+        return {
+            "mode": "count",
+            "count": max(1, safe_int(node.data.get("count", 1), 1)),
+            "stop_hotkey": "",
+        }
 
     def workflow_order(self):
         if not self.doc.edges:
@@ -2154,11 +2597,19 @@ class MacroStudio(tk.Tk):
         if not self.playing:
             return
         try:
-            nodes, loop_count, global_delay = self.playback_nodes_and_count()
-            for iteration in range(loop_count):
-                self.play_context["iteration"] = iteration + 1
-                self.play_context["loop_count"] = loop_count
-                self.status.set(f"Playing loop {iteration + 1} of {loop_count}")
+            nodes, loop_settings, global_delay = self.playback_nodes_and_count()
+            loop_count = loop_settings["count"]
+            if loop_settings["mode"] == "until hotkey":
+                self.start_playback_stop_listener(loop_settings.get("stop_hotkey", ""))
+            iteration = 0
+            while self.playing and (loop_count is None or iteration < loop_count):
+                iteration += 1
+                self.play_context["iteration"] = iteration
+                self.play_context["loop_count"] = loop_count or "until stopped"
+                if loop_count is None:
+                    self.status.set(f"Playing loop {iteration}; stop with {display_hotkey(loop_settings.get('stop_hotkey', ''))}")
+                else:
+                    self.status.set(f"Playing loop {iteration} of {loop_count}")
                 for index, node in enumerate(nodes):
                     if not self.playing:
                         break
@@ -2178,6 +2629,7 @@ class MacroStudio(tk.Tk):
             self.status.set("Playback failed")
             messagebox.showerror("Playback failed", str(exc))
         finally:
+            self.stop_playback_stop_listener()
             self.active_node_id = None
             self.playing = False
             self.play_context = None
@@ -2196,13 +2648,17 @@ class MacroStudio(tk.Tk):
             self.wait_for_window_title(str(data.get("title_contains", "")), safe_float(data.get("timeout", 10), 10))
         elif kind == "wait_hotkey":
             self.wait_for_hotkey(str(data.get("hotkey", "")), safe_float(data.get("timeout", 0), 0))
+        elif kind == "wait_click":
+            self.wait_for_click(data)
         elif kind == "move":
-            WindowsInput.move_mouse(int(data.get("x", 0)), int(data.get("y", 0)))
+            WindowsInput.move_mouse(self.resolve_int(data.get("x", 0)), self.resolve_int(data.get("y", 0)))
         elif kind == "click":
-            WindowsInput.move_mouse(int(data.get("x", 0)), int(data.get("y", 0)))
+            WindowsInput.move_mouse(self.resolve_int(data.get("x", 0)), self.resolve_int(data.get("y", 0)))
             WindowsInput.mouse_button(str(data.get("button", "left")), True)
             time.sleep(0.04)
             WindowsInput.mouse_button(str(data.get("button", "left")), False)
+        elif kind == "save_mouse":
+            self.save_mouse_position(str(data.get("variable", "mouse")))
         elif kind == "scroll":
             amount = int(data.get("amount", 3))
             direction = str(data.get("direction", "down"))
@@ -2223,6 +2679,8 @@ class MacroStudio(tk.Tk):
             self.clipboard_clear()
             self.clipboard_append(self.render_template(str(data.get("text", ""))))
             self.update()
+        elif kind == "save_clipboard":
+            self.save_clipboard_text(data)
         elif kind == "launch":
             subprocess.Popen(str(data.get("command", "")), shell=True)
         elif kind == "recorded":
@@ -2290,6 +2748,127 @@ class MacroStudio(tk.Tk):
         finally:
             listener.stop()
 
+    def start_playback_stop_listener(self, hotkey):
+        self.stop_playback_stop_listener()
+        if keyboard is None:
+            self.status.set("Loop stop hotkey unavailable: install pynput")
+            return
+        hotkey = str(hotkey or "").strip()
+        if not hotkey:
+            return
+        try:
+            self.playback_stop_listener = keyboard.GlobalHotKeys({hotkey: lambda: self.after(0, self.stop_all)})
+            self.playback_stop_listener.start()
+        except Exception as exc:
+            self.playback_stop_listener = None
+            self.status.set(f"Loop stop hotkey failed: {exc}")
+
+    def stop_playback_stop_listener(self):
+        if self.playback_stop_listener:
+            try:
+                self.playback_stop_listener.stop()
+            except Exception:
+                pass
+            self.playback_stop_listener = None
+
+    def wait_for_click(self, data):
+        if mouse is None:
+            self.status.set("Wait Click unavailable: install pynput")
+            return
+        target_button = str(data.get("button", "any")).lower()
+        timeout = safe_float(data.get("timeout", 0), 0)
+        save_position = str(data.get("save_position", "yes")).lower() == "yes"
+        variable = str(data.get("variable", "first_click")).strip() or "first_click"
+        captured = {}
+
+        def on_click(x, y, button, pressed):
+            if not pressed:
+                return None
+            button_name = str(button).split(".")[-1].lower()
+            if target_button != "any" and button_name != target_button:
+                return None
+            captured.update({"x": int(x), "y": int(y), "button": button_name})
+            return False
+
+        try:
+            listener = mouse.Listener(on_click=on_click)
+            listener.start()
+        except Exception as exc:
+            self.status.set(f"Wait Click failed: {exc}")
+            return
+        end_time = None if timeout <= 0 else time.perf_counter() + timeout
+        self.status.set("Waiting for click")
+        try:
+            while self.playing and not captured:
+                if end_time is not None and time.perf_counter() >= end_time:
+                    break
+                self.update()
+                time.sleep(0.03)
+        finally:
+            listener.stop()
+        if captured and save_position:
+            self.set_play_variable(f"{variable}_x", captured["x"])
+            self.set_play_variable(f"{variable}_y", captured["y"])
+            self.set_play_variable(f"{variable}_button", captured["button"])
+            self.status.set(f"Saved click to {variable}_x/y")
+
+    def save_mouse_position(self, variable):
+        x, y = get_mouse_position()
+        name = variable.strip() or "mouse"
+        self.set_play_variable(f"{name}_x", x)
+        self.set_play_variable(f"{name}_y", y)
+        self.status.set(f"Saved mouse position to {name}_x/y")
+
+    def save_clipboard_text(self, data):
+        if not isinstance(data, dict):
+            data = {"target": "variable", "variable": str(data)}
+        target = str(data.get("target", "variable")).lower()
+        variable = str(data.get("variable", "clipboard")).strip() or "clipboard"
+        dataset = str(data.get("dataset", "captured_items")).strip() or "captured_items"
+        include_blank = str(data.get("include_blank", "no")).lower() == "yes"
+        try:
+            value = self.clipboard_get()
+        except tk.TclError:
+            value = ""
+        if value == "" and not include_blank:
+            self.status.set("Skipped blank clipboard")
+            return
+        if target == "dataset":
+            self.append_dataset_value(dataset, value)
+            self.status.set(f"Appended clipboard to {dataset}")
+        elif target == "file":
+            path_text = self.render_template(str(data.get("file_path", ""))).strip()
+            if not path_text:
+                self.status.set("Save Clipboard file path is empty")
+                return
+            self.append_clipboard_file(path_text, value)
+            self.status.set(f"Appended clipboard to {Path(path_text).name}")
+        else:
+            self.set_play_variable(variable, value)
+            self.status.set(f"Saved clipboard to {variable}")
+
+    def append_dataset_value(self, name, value):
+        if self.play_context is None:
+            self.play_context = self.create_play_context()
+        dataset = self.play_context.setdefault("datasets", {}).setdefault(str(name), [])
+        dataset.append(value)
+        self.set_play_variable(name, "\n".join(str(item) for item in dataset))
+        self.set_play_variable(f"{name}_count", len(dataset))
+        self.set_play_variable(f"{name}_last", value)
+
+    def append_clipboard_file(self, file_path, value):
+        path = Path(file_path).expanduser()
+        if path.parent and not path.parent.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8", newline="") as handle:
+            handle.write(str(value).replace("\r\n", "\n").replace("\r", "\n"))
+            handle.write("\n")
+
+    def set_play_variable(self, name, value):
+        if self.play_context is None:
+            self.play_context = self.create_play_context()
+        self.play_context.setdefault("variables", {})[str(name)] = value
+
     def execute_counter(self, data):
         if self.play_context is None:
             return
@@ -2350,9 +2929,17 @@ class MacroStudio(tk.Tk):
             "loop_count": self.play_context.get("loop_count", 1),
         }
         values.update(self.play_context.get("counters", {}))
+        values.update(self.play_context.get("variables", {}))
+        for name, items in self.play_context.get("datasets", {}).items():
+            values[name] = "\n".join(str(item) for item in items)
+            values[f"{name}_count"] = len(items)
+            values[f"{name}_last"] = items[-1] if items else ""
         for key, value in values.items():
             text = text.replace("{" + str(key) + "}", str(value))
         return text
+
+    def resolve_int(self, value, fallback=0):
+        return safe_int(self.render_template(str(value)), fallback)
 
     def load_paste_file(self, file_path, column):
         path = Path(file_path)
