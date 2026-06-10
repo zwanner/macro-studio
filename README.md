@@ -1,6 +1,6 @@
 # Macro Studio
 
-![Interface](assets/interface.png)
+<img width="1564" height="1246" alt="image" src="https://github.com/user-attachments/assets/a965d290-4f7a-43c5-aaf3-e79eefa9b5ce" />
 
 Macro Studio is a Windows desktop macro builder with:
 
