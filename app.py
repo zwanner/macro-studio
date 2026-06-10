@@ -129,6 +129,7 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
         self.recorded_move_path = []
         self.recorded_pressed_keys = {}
         self.recorded_pressed_buttons = {}
+        self.recorded_active_modifiers = set()
         self.record_insert_after_id = None
         self.play_context = None
         self.playback_thread = None
@@ -1467,8 +1468,12 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
                 return f"mouse path, {len(event.get('points', []))} points"
             if event.get("kind") == "click":
                 return f"{event.get('button', 'left')} click +{event.get('delay', 0):.2f}s"
+            if event.get("kind") == "drag":
+                return f"drag to {event.get('x2', 0)},{event.get('y2', 0)} +{event.get('delay', 0):.2f}s"
             if event.get("kind") == "key":
                 return f"{event.get('key', 'key')} +{event.get('delay', 0):.2f}s"
+            if event.get("kind") == "hotkey":
+                return f"{event.get('keys', '')} +{event.get('delay', 0):.2f}s"
             return f"{event.get('kind', 'event')} +{event.get('delay', 0):.2f}s"
         if node.node_type == "loop":
             settings = self.loop_settings(node)

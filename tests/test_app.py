@@ -372,6 +372,110 @@ class RecordingTests(MacroStudioTestCase):
         self.assertEqual(recorded[0].title, "Key: a")
         self.assertNotIn("pressed", recorded[0].data["event"])
 
+    def test_press_drag_release_records_drag_node(self):
+        self.studio.recording = True
+        self.studio.record_start = time.perf_counter()
+        self.studio.record_insert_after_id = self.node("start").node_id
+
+        class Button:
+            def __str__(self):
+                return "Button.left"
+
+        self.studio.on_record_click(10, 20, Button(), True)
+        self.studio.on_record_move(60, 80)
+        self.studio.on_record_click(200, 240, Button(), False)
+        self.studio.update()
+
+        recorded = [node for node in self.studio.nodes if node.node_type == "recorded"]
+        self.assertEqual(len(recorded), 1)
+        event = recorded[0].data["event"]
+        self.assertEqual(event["kind"], "drag")
+        self.assertEqual((event["x"], event["y"]), (10, 20))
+        self.assertEqual((event["x2"], event["y2"]), (200, 240))
+        self.assertEqual(len(event["points"]), 1)
+        self.assertEqual(recorded[0].title, "Left Drag")
+
+    def test_recorded_drag_replays_press_move_release(self):
+        calls = []
+        self.studio.playing = True
+        with patch.object(app.WindowsInput, "move_mouse", lambda x, y: calls.append(("move", x, y))), \
+            patch.object(app.WindowsInput, "mouse_button", lambda button, pressed: calls.append(("button", button, pressed))), \
+            patch.object(app.time, "sleep", lambda _seconds: None):
+            self.studio.execute_recorded(
+                {
+                    "kind": "drag",
+                    "x": 1,
+                    "y": 2,
+                    "x2": 50,
+                    "y2": 60,
+                    "button": "left",
+                    "points": [{"x": 25, "y": 30, "delay": 0}],
+                    "delay": 0,
+                }
+            )
+        self.assertEqual(
+            calls,
+            [
+                ("move", 1, 2),
+                ("button", "left", True),
+                ("move", 25, 30),
+                ("move", 50, 60),
+                ("button", "left", False),
+            ],
+        )
+
+    def test_ctrl_combo_records_hotkey_node(self):
+        self.studio.recording = True
+        self.studio.record_start = time.perf_counter()
+        self.studio.record_insert_after_id = self.node("start").node_id
+
+        ctrl_key = type("Ctrl", (), {"char": None, "__str__": lambda self: "Key.ctrl_l"})()
+        c_key = type("C", (), {"char": "\x03"})()
+
+        self.studio.on_record_key_press(ctrl_key)
+        self.studio.on_record_key_press(c_key)
+        self.studio.on_record_key_release(c_key)
+        self.studio.on_record_key_release(ctrl_key)
+        self.studio.update()
+
+        recorded = [node for node in self.studio.nodes if node.node_type == "recorded"]
+        self.assertEqual(len(recorded), 1)
+        event = recorded[0].data["event"]
+        self.assertEqual(event["kind"], "hotkey")
+        self.assertEqual(event["keys"], "ctrl+c")
+        self.assertEqual(recorded[0].title, "Hotkey: ctrl+c")
+
+    def test_bare_modifier_tap_records_nothing(self):
+        self.studio.recording = True
+        self.studio.record_start = time.perf_counter()
+        self.studio.record_insert_after_id = self.node("start").node_id
+
+        ctrl_key = type("Ctrl", (), {"char": None, "__str__": lambda self: "Key.ctrl_l"})()
+        self.studio.on_record_key_press(ctrl_key)
+        self.studio.on_record_key_release(ctrl_key)
+        self.studio.update()
+
+        recorded = [node for node in self.studio.nodes if node.node_type == "recorded"]
+        self.assertEqual(recorded, [])
+
+    def test_shift_typing_stays_plain_keys(self):
+        self.studio.recording = True
+        self.studio.record_start = time.perf_counter()
+        self.studio.record_insert_after_id = self.node("start").node_id
+
+        shift_key = type("Shift", (), {"char": None, "__str__": lambda self: "Key.shift"})()
+        upper_key = type("A", (), {"char": "A"})()
+        self.studio.on_record_key_press(shift_key)
+        self.studio.on_record_key_press(upper_key)
+        self.studio.on_record_key_release(upper_key)
+        self.studio.on_record_key_release(shift_key)
+        self.studio.update()
+
+        recorded = [node for node in self.studio.nodes if node.node_type == "recorded"]
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual(recorded[0].data["event"]["kind"], "key")
+        self.assertEqual(recorded[0].data["event"]["key"], "A")
+
     def test_key_release_without_press_is_ignored(self):
         self.studio.recording = True
         self.studio.record_start = time.perf_counter()

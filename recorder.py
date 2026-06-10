@@ -3,7 +3,7 @@
 import time
 from tkinter import messagebox
 
-from hotkeys import display_hotkey
+from hotkeys import display_hotkey, normalize_hotkey_token
 from model import MacroNode
 
 try:
@@ -15,6 +15,14 @@ except ImportError:
 
 TYPED_KEY_MAP = {"space": " "}
 
+MODIFIER_TOKENS = {"ctrl", "shift", "alt", "cmd", "win"}
+# Shift alone is plain typing (capitals, punctuation); only these turn a
+# keystroke into a recorded hotkey combo.
+COMBO_MODIFIERS = {"ctrl", "alt", "cmd", "win"}
+MODIFIER_ORDER = {"ctrl": 0, "shift": 1, "alt": 2, "cmd": 3, "win": 4}
+
+DRAG_THRESHOLD_PX = 8
+
 
 def typed_character(key_name):
     """The literal character a recorded key event types, or None if it is not
@@ -23,6 +31,19 @@ def typed_character(key_name):
     if len(key_name) == 1 and key_name.isprintable():
         return key_name
     return TYPED_KEY_MAP.get(key_name)
+
+
+def combo_base_key(key_name):
+    """Maps the raw key seen while a modifier is held to its plain name.
+    Holding Ctrl makes pynput report letters as control characters
+    (Ctrl+C -> '\\x03'), which would not replay."""
+    key_name = str(key_name)
+    if len(key_name) == 1:
+        code = ord(key_name)
+        if 1 <= code <= 26:
+            return chr(code + 96)
+        return key_name.lower()
+    return key_name
 
 
 class RecorderMixin:
@@ -46,6 +67,7 @@ class RecorderMixin:
         self.recorded_move_path = []
         self.recorded_pressed_keys = {}
         self.recorded_pressed_buttons = {}
+        self.recorded_active_modifiers = set()
         self.record_insert_after_id = self.predecessor_before_end().node_id if self.predecessor_before_end() else None
         self.status.set(f"Recording... stop with {display_hotkey(self.settings['record_hotkey'])}")
         ml = mouse.Listener(on_move=self.on_record_move, on_click=self.on_record_click, on_scroll=self.on_record_scroll)
@@ -104,6 +126,27 @@ class RecorderMixin:
                     # The press happened before recording started; ignore the
                     # orphaned release.
                     return
+                press_x = started.get("x", x)
+                press_y = started.get("y", y)
+                if abs(x - press_x) + abs(y - press_y) > DRAG_THRESHOLD_PX:
+                    # Press and release in different places: a drag. The mouse
+                    # path captured while the button was down becomes the drag
+                    # path instead of a separate (duplicate) move-path node.
+                    points = self.recorded_move_path
+                    self.recorded_move_path = []
+                    self.add_recorded_event(
+                        {
+                            "kind": "drag",
+                            "x": press_x,
+                            "y": press_y,
+                            "x2": x,
+                            "y2": y,
+                            "button": name,
+                            "points": points,
+                            "delay": started.get("delay", 0),
+                        }
+                    )
+                    return
                 self.add_recorded_event({"kind": "click", "x": x, "y": y, "button": name, "delay": started.get("delay", 0)})
 
     def on_record_scroll(self, x, y, dx, dy):
@@ -115,12 +158,23 @@ class RecorderMixin:
         if self.recording:
             self.flush_recorded_move_path()
             key_name = self.clean_key(key)
+            token = normalize_hotkey_token(key_name)
+            if token in MODIFIER_TOKENS:
+                self.recorded_active_modifiers.add(token)
+                self.recorded_delay()
+                return
             if key_name not in self.recorded_pressed_keys:
                 self.recorded_pressed_keys[key_name] = self.recorded_delay()
 
     def on_record_key_release(self, key):
         if self.recording:
             key_name = self.clean_key(key)
+            token = normalize_hotkey_token(key_name)
+            if token in MODIFIER_TOKENS:
+                # Modifiers never record their own events; they either join a
+                # combo below or were the record hotkey's own keys.
+                self.recorded_active_modifiers.discard(token)
+                return
             delay = self.recorded_pressed_keys.pop(key_name, None)
             if delay is None:
                 # The press was never seen while recording. This is how the
@@ -128,6 +182,12 @@ class RecorderMixin:
                 # into the start of every recording; ignore the release.
                 return
             self.recorded_delay()
+            active = set(self.recorded_active_modifiers)
+            if active & COMBO_MODIFIERS:
+                modifiers = sorted(active, key=lambda part: MODIFIER_ORDER.get(part, 9))
+                combo = "+".join(modifiers + [combo_base_key(key_name)])
+                self.add_recorded_event({"kind": "hotkey", "keys": combo, "delay": delay})
+                return
             self.add_recorded_event({"kind": "key", "key": key_name, "delay": delay})
 
     @staticmethod

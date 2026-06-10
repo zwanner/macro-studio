@@ -14,8 +14,12 @@ def recorded_event_label(event):
         return f"Mouse Path ({len(event.get('points', []))})"
     if kind == "click":
         return f"{str(event.get('button', 'left')).title()} Click"
+    if kind == "drag":
+        return f"{str(event.get('button', 'left')).title()} Drag"
     if kind == "key":
         return f"Key: {event.get('key', '')}"
+    if kind == "hotkey":
+        return f"Hotkey: {event.get('keys', '')}"
     if kind == "scroll":
         return "Scroll Up" if int(event.get("amount", 0)) > 0 else "Scroll Down"
     return "Recorded Action"

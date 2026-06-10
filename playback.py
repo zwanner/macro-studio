@@ -654,6 +654,24 @@ class PlaybackMixin:
                 WindowsInput.mouse_button(button, True)
                 time.sleep(0.04)
                 WindowsInput.mouse_button(button, False)
+        elif kind == "drag":
+            button = str(event.get("button", "left"))
+            WindowsInput.move_mouse(int(event.get("x", 0)), int(event.get("y", 0)))
+            WindowsInput.mouse_button(button, True)
+            try:
+                time.sleep(0.05)
+                for point in event.get("points", []):
+                    if not self.playing:
+                        break
+                    self.wait_interruptible(float(point.get("delay", 0)))
+                    WindowsInput.move_mouse(int(point.get("x", 0)), int(point.get("y", 0)))
+                WindowsInput.move_mouse(int(event.get("x2", 0)), int(event.get("y2", 0)))
+                time.sleep(0.04)
+            finally:
+                # Never leave the button stuck down, even if playback stops.
+                WindowsInput.mouse_button(button, False)
+        elif kind == "hotkey":
+            WindowsInput.hotkey([part for part in str(event.get("keys", "")).split("+") if part])
         elif kind == "scroll":
             WindowsInput.move_mouse(int(event.get("x", 0)), int(event.get("y", 0)))
             WindowsInput.scroll(int(event.get("amount", 0)))
