@@ -1,6 +1,6 @@
 # Macro Studio
 
-<img width="1564" height="1246" alt="Macro Studio interface" src="https://github.com/user-attachments/assets/a965d290-4f7a-43c5-aaf3-e79eefa9b5ce" />
+<img width="1894" height="1245" alt="image" src="https://github.com/user-attachments/assets/6fffe6e8-fdbd-4209-85e4-9910a6babec3" />
 
 Macro Studio is a Windows desktop automation tool for recording, editing, and replaying mouse and keyboard workflows. It combines a traditional macro recorder with a visual node graph so simple click-and-type tasks can grow into repeatable workflow automations without writing code.
 
