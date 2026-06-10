@@ -245,7 +245,15 @@ Older `.macro.json` and `.json` files still load for compatibility.
 ## Project Structure
 
 ```text
-app.py                  Main Tkinter application and playback engine
+app.py                  Main Tkinter window, graph editor, and persistence
+playback.py             Playback engine (runs on a background thread)
+recorder.py             Global mouse/keyboard recording and cleanup
+model.py                Node and document model, node type definitions
+render.py               Drawing helpers, sprite cache, themed widgets
+winput.py               Windows input, clipboard, and display APIs (ctypes)
+hotkeys.py              Hotkey parsing and normalization
+theme.py                Colors, fonts, and DPI-aware scaling
+config.py               Paths, file types, and default settings
 tests/test_app.py        Regression tests
 assets/                 Logos, icons, and interface screenshot assets
 build.ps1               Windows build script
@@ -268,19 +276,20 @@ Macro Studio is built with:
 - PyInstaller for Windows packaging
 - unittest for regression testing
 
-The app uses a single-file application structure today. The core pieces are:
+The app is organized into focused modules. The core pieces are:
 
-- `MacroDocument`: an open script tab, including nodes, edges, dirty state, and undo/redo history.
-- `MacroNode`: a typed graph node with position, data fields, and stable ID.
-- `MacroStudio`: the main Tk window, editor, graph renderer, recorder, playback engine, and persistence layer.
-- `WindowsInput`: low-level Windows input helpers for mouse, keyboard, Unicode text, and clipboard paste shortcuts.
+- `MacroDocument` / `MacroNode` (`model.py`): an open script tab with nodes, edges, dirty state, and undo/redo history; typed graph nodes with stable IDs.
+- `MacroStudio` (`app.py`): the main Tk window, graph editor, inspector, tabs, and persistence layer.
+- `PlaybackMixin` (`playback.py`): the workflow execution engine. Playback runs on a background daemon thread so the UI stays responsive; UI updates are queued back to the main thread, and the clipboard is accessed through the Win32 API so worker code never touches Tk.
+- `RecorderMixin` (`recorder.py`): global event capture, including post-recording cleanup that merges typed keystroke runs into Type Text nodes.
+- `WindowsInput` (`winput.py`): low-level Windows input helpers for mouse, keyboard, Unicode text, and thread-safe clipboard access.
 
 The graph renderer has two modes:
 
 - Normal render: anti-aliased, polished rendering for idle editing.
 - Fast render: simplified rendering while dragging nodes or resizing loop frames.
 
-This keeps large scripts responsive while preserving the cleaner visual style when editing pauses.
+Anti-aliased sprites (node bodies, ports, edge curves, tabs, icons) are cached by geometry and color, so repeated refreshes reuse finished images instead of re-rendering through Pillow. During playback, only a highlight outline moves between nodes; the canvas is not redrawn per executed node.
 
 ## Safety Notes
 

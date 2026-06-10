@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Moved macro playback to a background thread so the app window stays responsive during playback and no longer freezes on long waits.
+- Reworked playback rendering: a lightweight highlight outline now tracks the active node instead of redrawing the whole canvas for every executed node.
+- Added sprite caching for anti-aliased node, port, edge, tab, and icon rendering (roughly 14x faster full-canvas refresh on mid-size graphs).
+- Fixed the record hotkey leaking ctrl/shift/r key nodes into the start of hotkey-started recordings.
+- Recorded runs of plain typed keystrokes now merge into a single editable Type Text node after recording stops.
+- The global play hotkey no longer opens a confirmation dialog, so it no longer steals focus from the target window; the countdown still applies.
+- Playback now reads and writes the clipboard through the Win32 API, making clipboard nodes thread-safe and more reliable.
+- Split the single-file app into focused modules (`model`, `playback`, `recorder`, `render`, `winput`, `hotkeys`, `theme`, `config`) with `app.py` as the UI layer.
+
 ## v0.2.1 - 2026-06-09
 
 - Added nested Loop Frame workflow behavior with visual containment and frame-body playback.
