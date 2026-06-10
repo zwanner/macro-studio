@@ -253,7 +253,7 @@ MacroStudio.spec        PyInstaller configuration
 requirements.txt        Runtime dependencies
 requirements-build.txt  Packaging dependencies
 CHANGELOG.md            Release notes
-LICENSE                 MIT license
+LICENSE                 Non-commercial source license
 ```
 
 ## Framework And Architecture
@@ -297,4 +297,6 @@ Macro Studio is intended for personal workflow automation. Do not use it to auto
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Macro Studio is source-available for non-commercial use. You may use, copy, modify, and share the software for non-commercial purposes, but you may not sell it, redistribute it for payment, or include it in a paid product or paid service without permission.
+
+See [LICENSE](LICENSE) for the full terms.
