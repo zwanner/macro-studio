@@ -208,7 +208,11 @@ class PlaybackMixin:
                     self.notify_status(f"Playing loop {iteration}; stop with {display_hotkey(loop_settings.get('stop_hotkey', ''))}")
                 else:
                     self.notify_status(f"Playing loop {iteration} of {loop_count}")
-                self.execute_node_sequence(nodes, global_delay)
+                if self.doc.edges:
+                    # Follow edges at runtime so condition nodes can branch.
+                    self.execute_graph(global_delay)
+                else:
+                    self.execute_node_sequence(nodes, global_delay)
                 if not self.playing:
                     break
             if self.playing:
@@ -225,6 +229,54 @@ class PlaybackMixin:
             self.playing = False
             self.play_context = None
             self._ui_call(self.refresh)
+
+    def execute_graph(self, global_delay=0):
+        """Walks the workflow edge by edge, letting condition nodes pick their
+        branch at runtime. Loop-frame bodies and script-level nodes are passed
+        through, not executed (frames run their own bodies)."""
+        nodes = self.nodes
+        node = self.start_node() or (min(nodes, key=lambda n: (n.y, n.x)) if nodes else None)
+        executed_any = False
+        steps = 0
+        limit = max(1000, len(nodes) * 250)
+        while node and self.playing:
+            steps += 1
+            if steps > limit:
+                self.notify_status("Playback stopped: workflow step limit reached", "error")
+                break
+            top_level = node.node_type not in ("loop", "global_delay") and self.nearest_loop_frame(node) is None
+            if top_level:
+                if executed_any and global_delay > 0:
+                    self.wait_interruptible(global_delay)
+                if not self.playing:
+                    break
+                self.active_node_id = node.node_id
+                self.notify_active_node(node.node_id)
+                self.execute_node(node)
+                executed_any = True
+            if node.node_type == "end":
+                break
+            node = self.next_workflow_node(node)
+
+    def next_workflow_node(self, node):
+        outgoing = sorted(
+            self.outgoing_edges(node),
+            key=lambda edge: (
+                (self.node_by_id(edge.get("to")).y if self.node_by_id(edge.get("to")) else 0),
+                (self.node_by_id(edge.get("to")).x if self.node_by_id(edge.get("to")) else 0),
+            ),
+        )
+        if not outgoing:
+            return None
+        if node.node_type == "if_window":
+            wanted = "then" if (self.play_context or {}).get("last_condition", True) else "else"
+            branch_edges = [edge for edge in outgoing if edge.get("branch") == wanted]
+            if not branch_edges:
+                branch_edges = [edge for edge in outgoing if not edge.get("branch")]
+            if not branch_edges:
+                return None
+            outgoing = branch_edges
+        return self.node_by_id(outgoing[0].get("to"))
 
     def execute_node_sequence(self, nodes, global_delay=0):
         for index, node in enumerate(nodes):
@@ -291,6 +343,8 @@ class PlaybackMixin:
             self.execute_loop_frame(node)
         elif kind == "wait_window":
             self.wait_for_window_title(str(data.get("title_contains", "")), safe_float(data.get("timeout", 10), 10))
+        elif kind == "if_window":
+            self.execute_if_window(data)
         elif kind == "wait_hotkey":
             self.wait_for_hotkey(str(data.get("hotkey", "")), safe_float(data.get("timeout", 0), 0))
         elif kind == "wait_click":
@@ -328,6 +382,25 @@ class PlaybackMixin:
             subprocess.Popen(str(data.get("command", "")), shell=True)
         elif kind == "recorded":
             self.execute_recorded(data.get("event", {}))
+
+    def execute_if_window(self, data):
+        text = str(data.get("title_contains", ""))
+        wait = safe_float(data.get("wait", 0), 0)
+        matched = self.window_title_matches(text)
+        end_time = time.perf_counter() + wait
+        while self.playing and not matched and time.perf_counter() < end_time:
+            time.sleep(0.1)
+            matched = self.window_title_matches(text)
+        if self.play_context is not None:
+            self.play_context["last_condition"] = bool(matched)
+        self.set_play_variable("window_found", "yes" if matched else "no")
+        self.notify_status(f"If Window: {'matched' if matched else 'no match'}")
+
+    @staticmethod
+    def window_title_matches(text):
+        if not text:
+            return True
+        return text.lower() in get_active_window_title().lower()
 
     def wait_for_window_title(self, text, timeout):
         if not text:

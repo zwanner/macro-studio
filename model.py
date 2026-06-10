@@ -64,6 +64,7 @@ NODE_TYPES = {
     "end": {"title": "End", "defaults": {}, "description": "Workflow stop point. Playback stops this path when it reaches this node."},
     "loop": {"title": "Loop Script", "defaults": {"mode": "count", "count": 3, "stop_hotkey": ""}, "description": "Repeats the entire script a fixed number of times, or runs until a stop hotkey is pressed. The loop node itself is skipped during playback."},
     "loop_frame": {"title": "Loop Frame", "defaults": {"mode": "count", "count": 3, "stop_hotkey": "", "width": 360, "height": 300}, "description": "Loops only the nodes visually placed inside this frame. Frames can be nested for advanced workflows."},
+    "if_window": {"title": "If Window", "defaults": {"title_contains": "", "wait": 0}, "description": "Checks whether the active window title contains text, then branches: the green check output runs when it matches, the red cross output when it does not. Wait keeps re-checking for up to that many seconds before deciding."},
     "global_delay": {"title": "Global Delay", "defaults": {"seconds": 0.1}, "description": "Adds a pause between every playback node in the script. This node acts as a script-level timing setting."},
     "counter": {"title": "Counter", "defaults": {"name": "counter", "start": 1, "step": 1}, "description": "Tracks a named number while playback runs. Use placeholders like {counter} in Type Text, Set Clipboard, or Paste data values."},
     "delay": {"title": "Delay", "defaults": {"seconds": 0.5}, "description": "Pauses playback for a number of seconds. Useful between clicks, launches, and pages that need time to load."},
@@ -100,6 +101,7 @@ FIELD_DESCRIPTIONS = {
     "seconds": "Pause duration in seconds. Decimals are allowed.",
     "title_contains": "Window-title text to wait for. Matching is case-insensitive.",
     "timeout": "Maximum seconds to wait before continuing.",
+    "wait": "Seconds to keep re-checking before taking the else branch. 0 checks once.",
     "hotkey": "Hotkey to wait for, using pynput syntax such as <ctrl>+<shift>+space.",
     "button": "Mouse button to click.",
     "x": "Absolute screen X coordinate in pixels. Supports placeholders and simple math, such as {first_click_x}+20.",
@@ -136,6 +138,7 @@ FIELD_LABELS = {
     "seconds": "Seconds",
     "title_contains": "Title contains",
     "timeout": "Timeout (s)",
+    "wait": "Wait (s)",
     "hotkey": "Hotkey",
     "button": "Button",
     "x": "X",
@@ -179,7 +182,7 @@ FIELD_OPTIONS = {
 }
 
 NODE_CATEGORIES = [
-    ("Flow", ["start", "end", "loop", "loop_frame", "counter", "note"]),
+    ("Flow", ["start", "end", "loop", "loop_frame", "if_window", "counter", "note"]),
     ("Timing", ["global_delay", "delay", "wait_window", "wait_hotkey", "wait_click"]),
     ("Mouse", ["click", "move", "save_mouse", "scroll"]),
     ("Keyboard", ["key", "hotkey", "type"]),

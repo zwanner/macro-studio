@@ -269,6 +269,95 @@ class GraphTests(MacroStudioTestCase):
         self.assertEqual(len(seen), 6)
 
 
+class BranchingTests(MacroStudioTestCase):
+    def build_branching_script(self):
+        start = app.MacroNode("start", 80, 80, {})
+        cond = app.MacroNode("if_window", 80, 180, {"title_contains": "Target", "wait": 0})
+        then_node = app.MacroNode("type", 20, 300, {"text": "yes"})
+        else_node = app.MacroNode("type", 300, 300, {"text": "no"})
+        end = app.MacroNode("end", 80, 420, {})
+        self.studio.nodes = [start, cond, then_node, else_node, end]
+        self.studio.doc.edges = [
+            {"from": start.node_id, "to": cond.node_id},
+            {"from": cond.node_id, "to": then_node.node_id, "branch": "then"},
+            {"from": cond.node_id, "to": else_node.node_id, "branch": "else"},
+            {"from": then_node.node_id, "to": end.node_id},
+            {"from": else_node.node_id, "to": end.node_id},
+        ]
+        return cond
+
+    def run_playback(self):
+        self.studio.playing = True
+        self.studio.play_context = self.studio.create_play_context()
+        self.studio._play_after_countdown(0)
+
+    def test_if_window_takes_then_branch_on_match(self):
+        self.build_branching_script()
+        typed = []
+        with patch.object(playback, "get_active_window_title", lambda: "My Target Window"), \
+            patch.object(app.WindowsInput, "type_text", lambda text, _should_continue=None: typed.append(text)):
+            self.run_playback()
+        self.assertEqual(typed, ["yes"])
+
+    def test_if_window_takes_else_branch_without_match(self):
+        self.build_branching_script()
+        typed = []
+        with patch.object(playback, "get_active_window_title", lambda: "Another Window"), \
+            patch.object(app.WindowsInput, "type_text", lambda text, _should_continue=None: typed.append(text)):
+            self.run_playback()
+        self.assertEqual(typed, ["no"])
+
+    def test_if_window_sets_window_found_variable(self):
+        self.build_branching_script()
+        results = []
+        original_execute = self.studio.execute_node
+
+        def capture(node):
+            original_execute(node)
+            if node.node_type == "if_window":
+                results.append(self.studio.play_context["variables"]["window_found"])
+
+        with patch.object(playback, "get_active_window_title", lambda: "Target ahead"), \
+            patch.object(app.WindowsInput, "type_text", lambda text, _should_continue=None: None), \
+            patch.object(self.studio, "execute_node", capture):
+            self.run_playback()
+        self.assertEqual(results, ["yes"])
+
+    def test_if_window_node_renders_branch_ports(self):
+        self.build_branching_script()
+        self.studio.refresh()
+        branches = [port[2] for port in self.studio.port_items.values() if port[1] == "output"]
+        self.assertIn("then", branches)
+        self.assertIn("else", branches)
+
+    def test_connection_drag_from_branch_port_creates_branch_edge(self):
+        cond = self.build_branching_script()
+        delay = app.MacroNode("delay", 500, 500, {"seconds": 0})
+        self.studio.nodes.append(delay)
+        self.studio.connection_drag = {"source": cond, "branch": "else", "line": None, "start": (0, 0)}
+        event = type("Event", (), {"x": 0, "y": 0})()
+        with patch.object(self.studio, "find_port_at", lambda x, y, kind=None: (delay, "input", None)):
+            self.studio.finish_connection_drag(event)
+        self.assertTrue(
+            any(
+                edge.get("branch") == "else" and edge["to"] == delay.node_id
+                for edge in self.studio.doc.edges
+            )
+        )
+
+    def test_workflow_without_edges_still_plays_sequentially(self):
+        start = app.MacroNode("start", 80, 80, {})
+        first = app.MacroNode("type", 80, 180, {"text": "a"})
+        second = app.MacroNode("type", 80, 280, {"text": "b"})
+        end = app.MacroNode("end", 80, 380, {})
+        self.studio.nodes = [start, first, second, end]
+        self.studio.doc.edges = []
+        typed = []
+        with patch.object(app.WindowsInput, "type_text", lambda text, _should_continue=None: typed.append(text)):
+            self.run_playback()
+        self.assertEqual(typed, ["a", "b"])
+
+
 class PersistenceTests(MacroStudioTestCase):
     def test_corrupt_macro_file_shows_error_instead_of_crashing(self):
         with tempfile.TemporaryDirectory() as tmp:

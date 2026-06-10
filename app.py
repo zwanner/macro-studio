@@ -213,12 +213,14 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
     def incoming_edges(self, node):
         return [edge for edge in self.doc.edges if edge.get("to") == node.node_id]
 
-    def add_edge(self, source, target, refresh=True, record=True):
+    def add_edge(self, source, target, refresh=True, record=True, branch=None):
         if not source or not target or source == target:
             return False
         if source.node_type == "end" or target.node_type == "start":
             return False
         edge = {"from": source.node_id, "to": target.node_id}
+        if branch:
+            edge["branch"] = branch
         if edge in self.doc.edges:
             return False
         if record:
@@ -1283,20 +1285,23 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
             target = self.node_by_id(edge.get("to"))
             if not source or not target:
                 continue
+            branch = edge.get("branch")
             color = THEME["line"]
             width = 2
+            if branch == "then":
+                color = THEME["accent_dark"]
+            elif branch == "else":
+                color = THEME["danger"]
             if target == self.selected:
                 color = THEME["danger"]
                 width = 3
             elif source == self.selected:
                 color = THEME["accent"]
                 width = 3
-            source_w = self.node_world_w(source)
-            source_h = self.node_world_h(source)
-            target_w = self.node_world_w(target)
-            x1 = self.to_screen(source.x + source_w / 2)
-            y1 = self.to_screen(source.y + source_h)
-            x2 = self.to_screen(target.x + target_w / 2)
+            port_x, port_y = self.output_port_position(source, branch)
+            x1 = self.to_screen(port_x)
+            y1 = self.to_screen(port_y)
+            x2 = self.to_screen(target.x + self.node_world_w(target) / 2)
             y2 = self.to_screen(target.y)
             self.draw_edge_curve(x1, y1, x2, y2, color, max(1, int(width * self.zoom)))
 
@@ -1454,16 +1459,36 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
 
     def draw_ports(self, node, x, y, w, h):
         r = max(5, int(graph_ui(7) * self.zoom))
-        input_x = x + w / 2
-        input_y = y
-        output_x = x + w / 2
-        output_y = y + h
         if node.node_type != "start":
-            item = self.draw_port_circle(input_x, input_y, r, THEME["panel_3"], THEME["accent"], max(1, int(2 * self.zoom)))
-            self.port_items[item] = (node, "input")
-        if node.node_type != "end":
-            item = self.draw_port_circle(output_x, output_y, r, THEME["accent"], THEME["text"], max(1, int(2 * self.zoom)))
-            self.port_items[item] = (node, "output")
+            item = self.draw_port_circle(x + w / 2, y, r, THEME["panel_3"], THEME["accent"], max(1, int(2 * self.zoom)))
+            self.port_items[item] = (node, "input", None)
+        if node.node_type == "if_window":
+            for branch, fraction, fill, glyph in (
+                ("then", 0.3, THEME["accent"], "✓"),
+                ("else", 0.7, THEME["danger"], "✕"),
+            ):
+                port_x = x + w * fraction
+                item = self.draw_port_circle(port_x, y + h, r, fill, THEME["text"], max(1, int(2 * self.zoom)))
+                self.port_items[item] = (node, "output", branch)
+                self.canvas.create_text(
+                    port_x,
+                    y + h - self.to_screen(graph_ui(11)),
+                    text=glyph,
+                    fill=fill,
+                    font=(UI_FONT, max(6, int(8 * self.zoom)), "bold"),
+                )
+        elif node.node_type != "end":
+            item = self.draw_port_circle(x + w / 2, y + h, r, THEME["accent"], THEME["text"], max(1, int(2 * self.zoom)))
+            self.port_items[item] = (node, "output", None)
+
+    def output_port_position(self, node, branch=None):
+        """World coordinates of a node's output port for the given branch."""
+        w = self.node_world_w(node)
+        h = self.node_world_h(node)
+        if node.node_type == "if_window" and branch in ("then", "else"):
+            fraction = 0.3 if branch == "then" else 0.7
+            return node.x + w * fraction, node.y + h
+        return node.x + w / 2, node.y + h
 
     def draw_port_circle(self, center_x, center_y, radius, fill, outline, width):
         if Image is not None and not self.fast_canvas_render:
@@ -1513,6 +1538,9 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
             else:
                 count = "file"
             return f"paste from {source}: {count} items"
+        if node.node_type == "if_window":
+            text = str(node.data.get("title_contains", "")).strip()
+            return f"if title has '{text}': ✓ then / ✕ else" if text else "always true: connect ✓ then / ✕ else"
         if node.node_type == "wait_click":
             variable = node.data.get("variable", "first_click")
             save = str(node.data.get("save_position", "yes")).lower() == "yes"
@@ -1552,11 +1580,14 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
         port = self.find_port_at(canvas_x, canvas_y, "output")
         if port and port[1] == "output":
             node = port[0]
+            branch = port[2]
             self.selected = node
+            port_x, port_y = self.output_port_position(node, branch)
             self.connection_drag = {
                 "source": node,
+                "branch": branch,
                 "line": None,
-                "start": (self.to_screen(node.x + self.node_world_w(node) / 2), self.to_screen(node.y + self.node_world_h(node))),
+                "start": (self.to_screen(port_x), self.to_screen(port_y)),
             }
             self.drag = None
             self.drag_moved = False
@@ -1755,11 +1786,13 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
         canvas_y = self.canvas.canvasy(event.y)
         target_port = self.find_port_at(canvas_x, canvas_y, "input")
         source = self.connection_drag["source"]
+        branch = self.connection_drag.get("branch")
         self.connection_drag = None
         if target_port and target_port[1] == "input":
             target = target_port[0]
-            if self.add_edge(source, target):
-                self.status.set(f"Connected {source.title} -> {target.title}")
+            if self.add_edge(source, target, branch=branch):
+                suffix = f" ({branch})" if branch else ""
+                self.status.set(f"Connected {source.title} -> {target.title}{suffix}")
         else:
             self.refresh()
 
