@@ -1,93 +1,300 @@
 # Macro Studio
 
-<img width="1564" height="1246" alt="image" src="https://github.com/user-attachments/assets/a965d290-4f7a-43c5-aaf3-e79eefa9b5ce" />
+<img width="1564" height="1246" alt="Macro Studio interface" src="https://github.com/user-attachments/assets/a965d290-4f7a-43c5-aaf3-e79eefa9b5ce" />
 
-Macro Studio is a Windows desktop macro builder with:
+Macro Studio is a Windows desktop automation tool for recording, editing, and replaying mouse and keyboard workflows. It combines a traditional macro recorder with a visual node graph so simple click-and-type tasks can grow into repeatable workflow automations without writing code.
 
-- A full Tkinter GUI
-- A clean multi-panel editor with script tabs
-- Macro recording, saving, loading, and replay
-- A node canvas for building macros by dropping actions into a flow
-- Built-in nodes for delays, mouse actions, keyboard shortcuts, clipboard actions, text entry, app launching, and recorded events
-- App settings for record, play, and stop hotkeys
-- Recent scripts from the File menu
-- Loop and counter nodes for repeated workflows
-- Data-driven paste from clipboard, inline rows copied from Excel, or CSV/TSV files
-- Hover tooltips and inspector descriptions for node behavior and settings
-- Explicit graph connections with Start and End workflow nodes
-- Workflow helper controls for connecting, unlinking, auto-linking, and auto-organizing nodes
+The project is currently focused on Windows automation and ships as both a Python source app and a PyInstaller-packaged Windows executable.
 
-## Setup
+## Highlights
 
-### Download Release
+- Record mouse clicks, mouse paths, scrolls, and keyboard actions.
+- Save and load scripts as `.macro` files.
+- Build workflows visually with Start, End, action, timing, clipboard, and loop nodes.
+- Use explicit graph connections by dragging between node ports.
+- Edit selected node settings in the inspector.
+- Work with multiple scripts through tabs.
+- Use global hotkeys for record, play, and stop.
+- Paste data from the clipboard, inline rows, CSV files, or TSV files.
+- Loop workflows by count or until a stop hotkey is pressed.
+- Use nested Loop Frame nodes to repeat only part of a workflow.
+- Save click positions, mouse positions, and clipboard values as variables for later nodes.
+- Use placeholders and simple math in coordinate fields, such as `{first_click_x}+({loop_index}*50)`.
+- Type text exactly, including spaces, capitalization, punctuation, tabs, and newlines.
+- Undo and redo graph edits with `Ctrl+Z` and `Ctrl+Y`.
+- Auto-organize node graphs, including loop frames that resize around child nodes.
 
-Download `Macro-Studio-v0.1.0-windows-x64.zip` from the GitHub release, extract the folder, and run:
+## Common Use Cases
+
+- Repeating UI clicks with a changing paste value from a CSV file.
+- Copying values from one app and appending them to a dataset or text file.
+- Waiting for a manual click, saving that click position, then returning to it later.
+- Running a workflow a fixed number of times.
+- Running a workflow until a stop hotkey is pressed.
+- Building nested loops, such as “for each selected item, paste four rows of data.”
+- Recording rough actions, then cleaning them into a more readable node workflow.
+
+## Download And Install
+
+Download the latest Windows release from the GitHub Releases page:
+
+[Macro Studio Releases](https://github.com/zwanner/macro-studio/releases)
+
+For v0.2.1, download:
+
+```text
+Macro-Studio-v0.2.1-windows.zip
+```
+
+Extract the zip and run:
 
 ```text
 Macro Studio.exe
 ```
 
-Keep the extracted `_internal` folder next to the executable. The release uses PyInstaller's folder-based build for faster startup and easier troubleshooting.
+Keep the extracted `_internal` folder next to the executable. Macro Studio currently uses PyInstaller's folder-based build because it starts faster and is easier to troubleshoot than a single-file executable.
 
-Windows may show a SmartScreen warning because the app is not code-signed yet.
+Windows SmartScreen may warn that the app is from an unknown publisher because the executable is not code-signed yet.
 
-### Run From Source
+## Run From Source
+
+Requirements:
+
+- Windows 10 or Windows 11
+- Python 3.11 or newer recommended
+- `pip`
+
+Install dependencies:
 
 ```powershell
 python -m pip install -r requirements.txt
+```
+
+Run the app:
+
+```powershell
 python app.py
 ```
 
-The app still opens without `pynput`, but global recording is disabled until the dependency is installed.
+The app can open without `pynput`, but recording and global hotkeys require it. The packaged release includes the required runtime dependencies.
 
-Macro files save as `.macro` by default. Older `.macro.json` and `.json` files still load because the file data remains JSON.
+## Build From Source
 
-## Tests
-
-```powershell
-python -m unittest discover -s tests -v
-```
-
-## Build Windows App
+Install runtime and build dependencies, run tests, and package the app:
 
 ```powershell
 .\build.ps1
 ```
 
-The build script installs runtime/build requirements, creates `assets\macro-logo.ico` from the high-resolution logo, runs tests, and packages the app with PyInstaller. The packaged executable is written to:
+The build output is written to:
 
-```powershell
+```text
 dist\Macro Studio\Macro Studio.exe
 ```
 
-## Default hotkeys
+To skip tests during a local build:
+
+```powershell
+.\build.ps1 -SkipTests
+```
+
+To create a release zip manually after building:
+
+```powershell
+Compress-Archive -Path "dist\Macro Studio" -DestinationPath "dist\Macro-Studio-v0.2.1-windows.zip" -Force
+```
+
+## Test Suite
+
+Run all regression tests:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+The test suite covers graph behavior, persistence, node execution helpers, recording cleanup, hotkey normalization, data paste behavior, loop frames, undo/redo, and UI regression checks.
+
+## Workflow Graph
+
+Every script starts with a Start node and an End node. Nodes are connected by edges:
+
+- Drag from a node's bottom output port to another node's top input port.
+- Add a node while another node is selected to auto-connect from the selected node.
+- Use inspector actions such as Auto Link, Unlink, Duplicate, Delete, Move Up, Move Down, and Clear.
+- Use `View > Auto Organize Nodes` to lay out the current workflow.
+
+The graph supports nested visual containers through Loop Frame nodes. Nodes placed inside a Loop Frame run as that frame's body. A smaller Loop Frame inside a larger Loop Frame becomes a nested loop.
+
+## Node Categories
+
+### Flow
+
+- Start: workflow entry point.
+- End: workflow exit point.
+- Loop Script: repeats the whole script by count or until a hotkey.
+- Loop Frame: repeats only nodes visually placed inside the frame.
+- Counter: increments a named counter for use in placeholders.
+- Note: adds documentation to the graph and is ignored during playback.
+
+### Timing
+
+- Global Delay: adds a delay between playback nodes.
+- Delay: pauses for a fixed number of seconds.
+- Wait Window: waits for an active window title match.
+- Wait Hotkey: pauses until a hotkey is pressed.
+- Wait Click: pauses for a manual click and can save the click position.
+
+### Mouse
+
+- Mouse Click: moves to coordinates and clicks.
+- Mouse Move: moves to coordinates without clicking.
+- Save Mouse Position: stores the current mouse position in variables.
+- Scroll: scrolls up or down.
+
+### Keyboard
+
+- Key Tap: taps a single key.
+- Hotkey: presses a key combination.
+- Type Text: types exact text, including whitespace, punctuation, capitalization, tabs, and newlines.
+
+### Clipboard
+
+- Copy: sends `Ctrl+C`.
+- Cut: sends `Ctrl+X`.
+- Paste: pastes from clipboard, inline data, CSV, or TSV.
+- Set Clipboard: sets clipboard text.
+- Save Clipboard: saves clipboard text to a variable, dataset, or file.
+
+### System
+
+- Launch App: starts an app or shell command.
+
+## Data Paste
+
+The Paste node supports three sources:
+
+- `clipboard`: paste the current clipboard.
+- `data`: paste one row at a time from the node's multi-line data field.
+- `file`: paste one row at a time from a CSV or TSV file.
+
+Paste nodes keep their own cursor during playback. This means a Paste-from-file node inside a 4x nested loop continues through the file across outer loop iterations:
+
+```text
+outer pass 1: rows 1-4
+outer pass 2: rows 5-8
+outer pass 3: rows 9-12
+```
+
+The `column` field is 1-based. Set it to `1` for the first CSV/TSV column, `2` for the second, and so on.
+
+## Variables And Placeholders
+
+Several nodes can save values into the playback context:
+
+- Wait Click can save `{first_click_x}`, `{first_click_y}`, and `{first_click_button}`.
+- Save Mouse Position can save `{mouse_x}` and `{mouse_y}` or another variable prefix.
+- Counter can expose `{counter}` or another named counter.
+- Save Clipboard can expose a variable, dataset count, and dataset last value.
+- Loops expose `{iteration}`, `{loop_index}`, and `{loop_count}`.
+
+Text fields and coordinate fields can use placeholders:
+
+```text
+{first_click_x}
+{first_click_y}
+{iteration}
+{loop_index}
+{loop_count}
+{items_count}
+{items_last}
+```
+
+Coordinate fields also support simple math:
+
+```text
+x: {first_click_x}+({loop_index}*50)
+y: {first_click_y}-10
+```
+
+This is useful for moving through repeated rows, columns, or offset targets.
+
+## Hotkeys
+
+Default hotkeys:
 
 - Record or stop recording: `Ctrl + Shift + R`
 - Play active script: `Ctrl + Shift + P`
 - Stop playback or recording: `Ctrl + Shift + X`
 
-You can change these from **Settings**. Hotkeys use pynput syntax such as `<ctrl>+<shift>+r`.
+You can change hotkeys from Settings.
 
-## Safety
+Internally hotkeys are normalized to `pynput` syntax. These are equivalent:
 
-Macro playback controls your real mouse and keyboard. Use the countdown and test macros in a harmless window first.
+```text
+shift+ctrl+x
+ctrl+shift+x
+<ctrl>+<shift>+x
+```
 
-This project is intended for personal workflow automation. Do not use it to automate systems you do not own or have permission to control.
+## File Format
 
-## Data Paste
+Macro Studio saves scripts as `.macro` files. The contents are JSON so files can still be inspected, backed up, versioned, and repaired manually if needed.
 
-Use a **Paste** node with `source` set to:
+Older `.macro.json` and `.json` files still load for compatibility.
 
-- `clipboard` to paste the current clipboard
-- `data` to paste one row at a time from the node's multi-line data field
-- `file` to paste one row at a time from a `.csv` or `.tsv` file path
+## Project Structure
 
-When using loops, each pass advances to the next paste item. Text fields can include placeholders like `{iteration}` or `{counter}`.
+```text
+app.py                  Main Tkinter application and playback engine
+tests/test_app.py        Regression tests
+assets/                 Logos, icons, and interface screenshot assets
+build.ps1               Windows build script
+MacroStudio.spec        PyInstaller configuration
+requirements.txt        Runtime dependencies
+requirements-build.txt  Packaging dependencies
+CHANGELOG.md            Release notes
+LICENSE                 MIT license
+```
 
-## Workflow Graph
+## Framework And Architecture
 
-New scripts include **Start** and **End** nodes. Use **Connect From** on a selected source node, select another node, then use **Connect To** to create an execution edge. You can also drag from a node's bottom output dot to another node's top input dot. Adding a node while another node is selected automatically links the selected node to the new node. **Auto Link** rebuilds a simple Start-to-End flow using top-to-bottom node order, and **View > Auto Organize Nodes** lays the active script into a clean vertical workflow.
+Macro Studio is built with:
+
+- Python
+- Tkinter and ttk for the desktop GUI
+- Pillow for anti-aliased graph and icon rendering
+- pynput for global recording and hotkey listeners
+- Windows `SendInput` and cursor APIs for playback
+- PyInstaller for Windows packaging
+- unittest for regression testing
+
+The app uses a single-file application structure today. The core pieces are:
+
+- `MacroDocument`: an open script tab, including nodes, edges, dirty state, and undo/redo history.
+- `MacroNode`: a typed graph node with position, data fields, and stable ID.
+- `MacroStudio`: the main Tk window, editor, graph renderer, recorder, playback engine, and persistence layer.
+- `WindowsInput`: low-level Windows input helpers for mouse, keyboard, Unicode text, and clipboard paste shortcuts.
+
+The graph renderer has two modes:
+
+- Normal render: anti-aliased, polished rendering for idle editing.
+- Fast render: simplified rendering while dragging nodes or resizing loop frames.
+
+This keeps large scripts responsive while preserving the cleaner visual style when editing pauses.
+
+## Safety Notes
+
+Macro playback controls your real mouse and keyboard. Test scripts in a harmless window first, keep the stop hotkey available, and avoid running new workflows against important data until you have watched them succeed.
+
+Macro Studio is intended for personal workflow automation. Do not use it to automate systems you do not own or do not have permission to control.
+
+## Known Limitations
+
+- Windows is the supported target platform.
+- The app is not code-signed yet.
+- Very large graphs may still need further rendering optimization.
+- The UI is currently Tkinter-based; a future migration to a modern UI stack remains possible.
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).

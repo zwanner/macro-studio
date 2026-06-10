@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.2.1 - 2026-06-09
+
+- Added nested Loop Frame workflow behavior with visual containment and frame-body playback.
+- Added drag-resizing for Loop Frame nodes.
+- Improved Auto Organize so loop frames organize and resize around child nodes.
+- Added per-node Paste cursors so CSV/TSV data continues across nested loop iterations.
+- Added `{loop_index}` and simple coordinate math for offset workflows.
+- Added Undo and Redo with `Ctrl+Z` and `Ctrl+Y`.
+- Improved Type Text so capitalization, punctuation, spaces, tabs, and newlines are typed exactly.
+- Fixed playback stop hotkey behavior for normal non-loop scripts and long Type Text nodes.
+- Fixed global hotkey normalization for loose hotkey formats like `shift+ctrl+x`.
+- Improved graph drag performance with a fast interactive render path.
+- Expanded README documentation with installation, build, node, workflow, and architecture details.
+
 ## v0.2.0 - 2026-06-09
 
 - Added workflow capture nodes for waiting on a click, saving mouse position, and saving clipboard data.

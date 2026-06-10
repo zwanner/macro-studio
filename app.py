@@ -179,6 +179,7 @@ class WindowsInput:
     INPUT_MOUSE = 0
     INPUT_KEYBOARD = 1
     KEYEVENTF_KEYUP = 0x0002
+    KEYEVENTF_UNICODE = 0x0004
     MOUSEEVENTF_MOVE = 0x0001
     MOUSEEVENTF_ABSOLUTE = 0x8000
     MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -257,9 +258,22 @@ class WindowsInput:
         cls.key_up("ctrl")
 
     @classmethod
-    def type_text(cls, text):
-        for char in text:
-            cls.key_tap(char.lower())
+    def unicode_key_tap(cls, code_unit):
+        cls._send(Input(cls.INPUT_KEYBOARD, InputUnion(ki=KeyBdInput(0, code_unit, cls.KEYEVENTF_UNICODE, 0, None))))
+        cls._send(Input(cls.INPUT_KEYBOARD, InputUnion(ki=KeyBdInput(0, code_unit, cls.KEYEVENTF_UNICODE | cls.KEYEVENTF_KEYUP, 0, None))))
+
+    @staticmethod
+    def utf16_code_units(text):
+        raw = str(text).encode("utf-16-le")
+        return [int.from_bytes(raw[index:index + 2], "little") for index in range(0, len(raw), 2)]
+
+    @classmethod
+    def type_text(cls, text, should_continue=None):
+        should_continue = should_continue or (lambda: True)
+        for code_unit in cls.utf16_code_units(text):
+            if not should_continue():
+                break
+            cls.unicode_key_tap(code_unit)
             time.sleep(0.01)
 
     @classmethod
@@ -824,12 +838,14 @@ class MacroStudio(tk.Tk):
         self.untitled_counter = 0
         self.node_items = {}
         self.port_items = {}
+        self.resize_items = {}
         self.canvas_image_refs = []
         self.inspector_vars = {}
         self.suppress_dirty = False
         self.suppress_history = False
         self.pending_connection_source = None
         self.connection_drag = None
+        self.frame_resize = None
         self.drag = None
         self.drag_moved = False
         self.drag_history_snapshot = None
@@ -1382,9 +1398,9 @@ class MacroStudio(tk.Tk):
         if self.hotkey_listener:
             self.hotkey_listener.stop()
         mapping = {
-            self.settings["record_hotkey"]: lambda: self.after(0, self.toggle_recording),
-            self.settings["play_hotkey"]: lambda: self.after(0, self.play_macro),
-            self.settings["stop_hotkey"]: lambda: self.after(0, self.stop_all),
+            canonical_hotkey(self.settings["record_hotkey"]): lambda: self.after(0, self.toggle_recording),
+            canonical_hotkey(self.settings["play_hotkey"]): lambda: self.after(0, self.play_macro),
+            canonical_hotkey(self.settings["stop_hotkey"]): self.request_stop_all,
         }
         try:
             self.hotkey_listener = keyboard.GlobalHotKeys(mapping)
@@ -1725,6 +1741,9 @@ class MacroStudio(tk.Tk):
             return max(self.node_display_h() * 2, graph_ui(safe_float(node.data.get("height", 300), 300)))
         return self.node_display_h()
 
+    def loop_frame_raw_size(self, world_w, world_h):
+        return max(NODE_W, world_w / NODE_DISPLAY_SCALE), max(NODE_H * 2, world_h / NODE_DISPLAY_SCALE)
+
     def node_center(self, node):
         return node.x + self.node_world_w(node) / 2, node.y + self.node_world_h(node) / 2
 
@@ -1837,6 +1856,7 @@ class MacroStudio(tk.Tk):
             self.canvas.delete("all")
             self.node_items.clear()
             self.port_items.clear()
+            self.resize_items.clear()
             self.canvas_image_refs.clear()
             if update_scrollregion:
                 self.update_canvas_scrollregion()
@@ -2018,9 +2038,42 @@ class MacroStudio(tk.Tk):
             width=max(90, w - self.to_screen(graph_ui(176))),
         )
         self.draw_ports(node, x, y, w, h)
+        self.draw_loop_resize_handle(node, x, y, w, h)
         self.node_items[rect] = node
         self.node_items[title] = node
         self.node_items[summary] = node
+
+    def draw_loop_resize_handle(self, node, x, y, w, h):
+        size = max(14, int(18 * self.zoom))
+        pad = max(5, int(7 * self.zoom))
+        x2 = x + w - pad
+        y2 = y + h - pad
+        x1 = x2 - size
+        y1 = y2 - size
+        handle = self.canvas.create_rectangle(
+            x1,
+            y1,
+            x2,
+            y2,
+            fill=THEME["panel_3"],
+            outline=THEME["accent"],
+            width=max(1, int(2 * self.zoom)),
+        )
+        line_gap = max(4, int(5 * self.zoom))
+        handle_items = [handle]
+        for index in range(3):
+            offset = index * line_gap
+            line = self.canvas.create_line(
+                x2 - offset,
+                y2 - size + offset,
+                x2 - size + offset,
+                y2 - offset,
+                fill=THEME["accent"],
+                width=max(1, int(self.zoom)),
+            )
+            handle_items.append(line)
+        for item in handle_items:
+            self.resize_items[item] = node
 
     def draw_antialiased_round_rect(self, x, y, w, h, radius, fill, outline="", width=1):
         if Image is None or self.fast_canvas_render:
@@ -2129,6 +2182,22 @@ class MacroStudio(tk.Tk):
     def on_canvas_press(self, event):
         canvas_x = self.canvas.canvasx(event.x)
         canvas_y = self.canvas.canvasy(event.y)
+        resize_node = self.find_resize_handle_at(canvas_x, canvas_y)
+        if resize_node:
+            self.selected = resize_node
+            self.frame_resize = {
+                "node": resize_node,
+                "start_x": self.from_screen(canvas_x),
+                "start_y": self.from_screen(canvas_y),
+                "start_w": self.node_world_w(resize_node),
+                "start_h": self.node_world_h(resize_node),
+            }
+            self.drag = None
+            self.connection_drag = None
+            self.drag_history_snapshot = self.document_snapshot()
+            self.drag_moved = False
+            self.refresh()
+            return
         port = self.find_port_at(canvas_x, canvas_y, "output")
         if port and port[1] == "output":
             node = port[0]
@@ -2151,6 +2220,9 @@ class MacroStudio(tk.Tk):
         self.refresh()
 
     def on_canvas_drag(self, event):
+        if self.frame_resize:
+            self.update_frame_resize(event)
+            return
         if self.connection_drag:
             self.update_connection_preview(event)
             return
@@ -2167,11 +2239,37 @@ class MacroStudio(tk.Tk):
         self.refresh(update_inspector=False, update_status=False, update_scrollregion=False, fast=True)
 
     def on_canvas_release(self, event):
+        if self.frame_resize:
+            self.finish_frame_resize()
+            return
         if self.connection_drag:
             self.finish_connection_drag(event)
             return
         self.drag = None
         self.nodes.sort(key=lambda n: n.y)
+        if self.drag_moved:
+            if self.drag_history_snapshot:
+                self.push_history_snapshot(self.drag_history_snapshot)
+            self.mark_dirty()
+        self.drag_history_snapshot = None
+        self.drag_moved = False
+        self.refresh()
+
+    def update_frame_resize(self, event):
+        data = self.frame_resize
+        node = data["node"]
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        new_w = max(self.node_display_w(), data["start_w"] + self.from_screen(canvas_x) - data["start_x"])
+        new_h = max(self.node_display_h() * 2, data["start_h"] + self.from_screen(canvas_y) - data["start_y"])
+        raw_w, raw_h = self.loop_frame_raw_size(new_w, new_h)
+        self.drag_moved = self.drag_moved or node.data.get("width") != raw_w or node.data.get("height") != raw_h
+        node.data["width"] = round(raw_w, 1)
+        node.data["height"] = round(raw_h, 1)
+        self.refresh(update_inspector=False, update_status=False, update_scrollregion=False, fast=True)
+
+    def finish_frame_resize(self):
+        self.frame_resize = None
         if self.drag_moved:
             if self.drag_history_snapshot:
                 self.push_history_snapshot(self.drag_history_snapshot)
@@ -2217,6 +2315,15 @@ class MacroStudio(tk.Tk):
             port = self.port_items.get(item)
             if port and (kind is None or port[1] == kind):
                 return port
+        return None
+
+    def find_resize_handle_at(self, canvas_x, canvas_y):
+        radius = max(5, int(8 * self.zoom))
+        items = self.canvas.find_overlapping(canvas_x - radius, canvas_y - radius, canvas_x + radius, canvas_y + radius)
+        for item in reversed(items):
+            node = self.resize_items.get(item)
+            if node:
+                return node
         return None
 
     def update_inspector(self):
@@ -2410,24 +2517,85 @@ class MacroStudio(tk.Tk):
     def auto_organize_nodes(self):
         if not self.nodes:
             return
-        ordered = self.workflow_order() if self.doc.edges else []
-        if not ordered or len(ordered) != len(self.nodes) or any(node.node_type == "end" for node in ordered[:-1]):
-            starts = [node for node in self.nodes if node.node_type == "start"]
-            ends = [node for node in self.nodes if node.node_type == "end"]
-            middle = [node for node in self.nodes if node.node_type not in ("start", "end")]
-            ordered = starts[:1] + sorted(middle, key=lambda n: (n.y, n.x)) + ends[:1]
-        x = 170
-        y = 96
-        gap = 118
         self.record_history()
-        for index, node in enumerate(ordered):
-            node.x = x
-            node.y = y + index * gap
-        self.doc.edges = [{"from": a.node_id, "to": b.node_id} for a, b in zip(ordered, ordered[1:])]
+        frames = [node for node in self.nodes if node.node_type == "loop_frame"]
+        if frames:
+            membership = self.loop_frame_membership_snapshot()
+            top_level = [node for node in self.nodes if self.nearest_loop_frame(node) is None]
+            ordered = self.organized_order(top_level)
+            self.layout_scope(ordered, membership, 170, 96)
+        else:
+            ordered = self.organized_order(self.nodes)
+            x = 170
+            y = 96
+            gap = 118
+            for index, node in enumerate(ordered):
+                node.x = x
+                node.y = y + index * gap
+            self.doc.edges = [{"from": a.node_id, "to": b.node_id} for a, b in zip(ordered, ordered[1:])]
         self.selected = self.selected if self.selected in self.nodes else ordered[0]
         self.mark_dirty()
         self.refresh()
         self.status.set("Auto-organized nodes")
+
+    def organized_order(self, candidates):
+        if not self.doc.edges:
+            starts = [node for node in candidates if node.node_type == "start"]
+            ends = [node for node in candidates if node.node_type == "end"]
+            middle = [node for node in candidates if node.node_type not in ("start", "end")]
+            return starts[:1] + sorted(middle, key=lambda n: (n.y, n.x)) + ends[:1]
+        candidate_ids = {node.node_id for node in candidates}
+        ordered = [node for node in self.workflow_order() if node.node_id in candidate_ids]
+        ordered_ids = {node.node_id for node in ordered}
+        missing = [node for node in candidates if node.node_id not in ordered_ids]
+        starts = [node for node in missing if node.node_type == "start"]
+        ends = [node for node in missing if node.node_type == "end"]
+        middle = [node for node in missing if node.node_type not in ("start", "end")]
+        ordered = starts + ordered + sorted(middle, key=lambda n: (n.y, n.x)) + ends
+        seen = set()
+        unique = []
+        for node in ordered:
+            if node.node_id not in seen:
+                unique.append(node)
+                seen.add(node.node_id)
+        return unique
+
+    def loop_frame_membership_snapshot(self):
+        membership = {frame.node_id: [] for frame in self.nodes if frame.node_type == "loop_frame"}
+        for node in self.nodes:
+            frame = self.nearest_loop_frame(node)
+            if frame:
+                membership.setdefault(frame.node_id, []).append(node)
+        return membership
+
+    def layout_scope(self, nodes, membership, x, y):
+        cursor_y = y
+        gap = 118
+        for node in self.organized_order(nodes):
+            node.x = x
+            node.y = cursor_y
+            if node.node_type == "loop_frame":
+                body = membership.get(node.node_id, [])
+                self.layout_scope(body, membership, x + 72, cursor_y + 92)
+                self.resize_loop_frame_to_children(node, body)
+            cursor_y += self.node_world_h(node) + gap
+        return cursor_y
+
+    def resize_loop_frame_to_children(self, frame, children):
+        if not children:
+            raw_w, raw_h = self.loop_frame_raw_size(self.node_display_w() * 1.8, self.node_display_h() * 2.4)
+            frame.data["width"] = round(raw_w, 1)
+            frame.data["height"] = round(raw_h, 1)
+            return
+        padding = 72
+        bottom_padding = 72
+        right = max(child.x + self.node_world_w(child) for child in children)
+        bottom = max(child.y + self.node_world_h(child) for child in children)
+        world_w = max(self.node_display_w() * 1.8, right - frame.x + padding)
+        world_h = max(self.node_display_h() * 2.4, bottom - frame.y + bottom_padding)
+        raw_w, raw_h = self.loop_frame_raw_size(world_w, world_h)
+        frame.data["width"] = round(raw_w, 1)
+        frame.data["height"] = round(raw_h, 1)
 
     def delete_selected(self):
         if self.selected in self.nodes:
@@ -2646,6 +2814,14 @@ class MacroStudio(tk.Tk):
         self.stop_playback_stop_listener()
         self.status.set("Stopped")
 
+    def request_stop_all(self):
+        self.playing = False
+        self.recording = False
+        try:
+            self.after(0, self.stop_all)
+        except RuntimeError:
+            pass
+
     def recorded_delay(self):
         now = time.perf_counter()
         delay = now - self.record_start
@@ -2817,8 +2993,8 @@ class MacroStudio(tk.Tk):
             nodes, loop_settings, global_delay = self.playback_nodes_and_count()
             self.play_context["global_delay"] = global_delay
             loop_count = loop_settings["count"]
-            if loop_settings["mode"] == "until hotkey":
-                self.start_playback_stop_listener(loop_settings.get("stop_hotkey", ""))
+            stop_hotkey = loop_settings.get("stop_hotkey", "") if loop_settings["mode"] == "until hotkey" else self.settings.get("stop_hotkey", "")
+            self.start_playback_stop_listener(stop_hotkey)
             iteration = 0
             while self.playing and (loop_count is None or iteration < loop_count):
                 iteration += 1
@@ -2932,7 +3108,7 @@ class MacroStudio(tk.Tk):
         elif kind == "hotkey":
             WindowsInput.hotkey(self.hotkey_parts(data))
         elif kind == "type":
-            WindowsInput.type_text(self.render_template(str(data.get("text", ""))))
+            WindowsInput.type_text(self.render_template(str(data.get("text", ""))), lambda: self.playing)
         elif kind == "copy":
             WindowsInput.hotkey(["ctrl", "c"])
         elif kind == "cut":
@@ -3017,11 +3193,11 @@ class MacroStudio(tk.Tk):
         if keyboard is None:
             self.status.set("Loop stop hotkey unavailable: install pynput")
             return
-        hotkey = str(hotkey or "").strip()
+        hotkey = canonical_hotkey(hotkey)
         if not hotkey:
             return
         try:
-            self.playback_stop_listener = keyboard.GlobalHotKeys({hotkey: lambda: self.after(0, self.stop_all)})
+            self.playback_stop_listener = keyboard.GlobalHotKeys({hotkey: self.request_stop_all})
             self.playback_stop_listener.start()
         except Exception as exc:
             self.playback_stop_listener = None
@@ -3344,6 +3520,19 @@ def hotkey_token_set(hotkey):
         for token in (normalize_hotkey_token(part) for part in str(hotkey).split("+"))
         if token
     }
+
+
+def canonical_hotkey(hotkey):
+    parts = [normalize_hotkey_token(part) for part in str(hotkey or "").split("+")]
+    parts = [part for part in parts if part]
+    if not parts:
+        return ""
+    modifier_order = {"ctrl": 0, "shift": 1, "alt": 2, "cmd": 3, "win": 4}
+    modifiers = sorted((part for part in parts if part in modifier_order), key=lambda part: modifier_order[part])
+    keys = [part for part in parts if part not in modifier_order]
+    canonical_parts = modifiers + keys
+    wrapped = [f"<{part}>" if part in modifier_order else part for part in canonical_parts]
+    return "+".join(wrapped)
 
 
 def clean_tab_title(title):

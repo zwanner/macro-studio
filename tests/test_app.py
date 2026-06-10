@@ -15,6 +15,7 @@ import app
 
 class MacroStudioTestCase(unittest.TestCase):
     def setUp(self):
+        self.original_install_global_hotkeys = app.MacroStudio.install_global_hotkeys
         self.patches = [
             patch.object(app.MacroStudio, "install_global_hotkeys", lambda self: None),
             patch.object(app.MacroStudio, "apply_window_chrome", lambda self: None),
@@ -79,6 +80,29 @@ class GraphTests(MacroStudioTestCase):
         self.assertEqual([node.node_type for node in ordered], ["start", "click", "delay", "end"])
         self.assertEqual([node.x for node in ordered], [170, 170, 170, 170])
         self.assertEqual([node.y for node in ordered], sorted(node.y for node in ordered))
+
+    def test_auto_organize_nodes_resizes_loop_frames_around_children(self):
+        start = app.MacroNode("start", 80, 80, {})
+        outer = app.MacroNode("loop_frame", 100, 180, {"width": 520, "height": 520, "count": 2})
+        wait = app.MacroNode("wait_click", 650, 620, {"button": "any", "timeout": 0, "save_position": "yes", "variable": "click"})
+        inner = app.MacroNode("loop_frame", 180, 280, {"width": 300, "height": 300, "count": 4})
+        delay = app.MacroNode("delay", 230, 360, {"seconds": 0})
+        end = app.MacroNode("end", 80, 820, {})
+        self.studio.nodes = [start, outer, wait, inner, delay, end]
+        self.studio.doc.edges = [
+            {"from": start.node_id, "to": outer.node_id},
+            {"from": outer.node_id, "to": end.node_id},
+        ]
+
+        self.studio.auto_organize_nodes()
+
+        self.assertTrue(self.studio.node_inside_frame(wait, outer))
+        self.assertTrue(self.studio.node_inside_frame(inner, outer))
+        self.assertTrue(self.studio.node_inside_frame(delay, inner))
+        self.assertEqual(self.studio.nearest_loop_frame(wait), outer)
+        self.assertEqual(self.studio.nearest_loop_frame(delay), inner)
+        self.assertGreaterEqual(outer.x + self.studio.node_world_w(outer), wait.x + self.studio.node_world_w(wait))
+        self.assertGreaterEqual(inner.y + self.studio.node_world_h(inner), delay.y + self.studio.node_world_h(delay))
 
     def test_playback_sets_and_clears_active_node(self):
         self.studio.selected = self.node("start")
@@ -158,6 +182,29 @@ class GraphTests(MacroStudioTestCase):
         self.assertIsNone(self.studio.nearest_loop_frame(outside_delay))
         self.assertEqual(self.studio.loop_frame_body_nodes(outer), [inner, outer_delay])
         self.assertEqual(self.studio.loop_frame_body_nodes(inner), [inner_delay])
+
+    def test_loop_frame_resize_drag_updates_dimensions(self):
+        frame = app.MacroNode("loop_frame", 100, 100, {"width": 360, "height": 300, "count": 2})
+        self.studio.nodes = [frame]
+        self.studio.selected = frame
+        start_w = self.studio.node_world_w(frame)
+        start_h = self.studio.node_world_h(frame)
+        self.studio.frame_resize = {
+            "node": frame,
+            "start_x": 0,
+            "start_y": 0,
+            "start_w": start_w,
+            "start_h": start_h,
+        }
+        event = type("Event", (), {"x": 120, "y": 90})()
+
+        with patch.object(self.studio, "refresh") as refresh:
+            self.studio.update_frame_resize(event)
+
+        self.assertGreater(frame.data["width"], 360)
+        self.assertGreater(frame.data["height"], 300)
+        refresh.assert_called_once()
+        self.assertTrue(refresh.call_args.kwargs["fast"])
 
     def test_playback_excludes_nodes_inside_loop_frames_from_top_level(self):
         start = app.MacroNode("start", 80, 80, {})
@@ -710,6 +757,87 @@ class DataAndUiTests(MacroStudioTestCase):
     def test_wait_hotkey_token_normalization(self):
         self.assertEqual(app.hotkey_token_set("<ctrl>+<shift>+space"), {"ctrl", "shift", "space"})
         self.assertEqual(app.hotkey_token_set("control + a"), {"ctrl", "a"})
+        self.assertEqual(app.canonical_hotkey("shift+ctrl+x"), "<ctrl>+<shift>+x")
+        self.assertEqual(app.canonical_hotkey("<shift>+<control>+space"), "<ctrl>+<shift>+space")
+
+    def test_loop_stop_listener_normalizes_hotkey_syntax(self):
+        mappings = []
+
+        class FakeGlobalHotKeys:
+            def __init__(self, mapping):
+                mappings.append(mapping)
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        fake_keyboard = type("FakeKeyboard", (), {"GlobalHotKeys": FakeGlobalHotKeys})
+        with patch.object(app, "keyboard", fake_keyboard):
+            self.studio.start_playback_stop_listener("shift+ctrl+x")
+
+        self.assertEqual(list(mappings[0].keys()), ["<ctrl>+<shift>+x"])
+
+    def test_global_hotkeys_install_without_existing_listener(self):
+        mappings = []
+
+        class FakeGlobalHotKeys:
+            def __init__(self, mapping):
+                mappings.append(mapping)
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        fake_keyboard = type("FakeKeyboard", (), {"GlobalHotKeys": FakeGlobalHotKeys})
+        with patch.object(app, "keyboard", fake_keyboard):
+            self.studio.hotkey_listener = None
+            self.original_install_global_hotkeys(self.studio)
+
+        self.assertIn("<ctrl>+<shift>+x", mappings[0])
+
+    def test_default_stop_hotkey_listener_starts_for_non_loop_playback(self):
+        start_listener_calls = []
+        start = self.node("start")
+        end = self.node("end")
+        text = app.MacroNode("type", 80, 160, {"text": "hello world"})
+        self.studio.nodes = [start, text, end]
+        self.studio.doc.edges = [
+            {"from": start.node_id, "to": text.node_id},
+            {"from": text.node_id, "to": end.node_id},
+        ]
+
+        with patch.object(self.studio, "start_playback_stop_listener", lambda hotkey: start_listener_calls.append(hotkey)), \
+            patch.object(app.WindowsInput, "type_text", lambda _text, _should_continue=None: None):
+            self.studio.playing = True
+            self.studio.play_context = self.studio.create_play_context()
+            self.studio._play_after_countdown(0)
+
+        self.assertEqual(start_listener_calls, [self.studio.settings["stop_hotkey"]])
+
+    def test_playback_stop_hotkey_callback_stops_immediately(self):
+        mappings = []
+
+        class FakeGlobalHotKeys:
+            def __init__(self, mapping):
+                mappings.append(mapping)
+
+            def start(self):
+                pass
+
+            def stop(self):
+                pass
+
+        fake_keyboard = type("FakeKeyboard", (), {"GlobalHotKeys": FakeGlobalHotKeys})
+        with patch.object(app, "keyboard", fake_keyboard), patch.object(self.studio, "after", lambda _delay, callback: None):
+            self.studio.playing = True
+            self.studio.start_playback_stop_listener("shift+ctrl+x")
+            mappings[0]["<ctrl>+<shift>+x"]()
+
+        self.assertFalse(self.studio.playing)
 
     def test_hotkey_node_includes_select_all_and_custom_option(self):
         options = app.FIELD_OPTIONS[("hotkey", "keys")]
@@ -722,6 +850,28 @@ class DataAndUiTests(MacroStudioTestCase):
             ["ctrl", "shift", "a"],
         )
         self.assertEqual(self.studio.hotkey_parts({"keys": "ctrl+a", "custom_keys": "ctrl+shift+a"}), ["ctrl", "a"])
+
+    def test_type_text_emits_exact_unicode_text(self):
+        sent = []
+        text = "Hello, WORLD! 1+2 = 3.\nNext\tTab"
+        with patch.object(app.WindowsInput, "unicode_key_tap", lambda code_unit: sent.append(code_unit)), \
+            patch.object(app.time, "sleep", lambda _seconds: None):
+            app.WindowsInput.type_text(text)
+
+        self.assertEqual(sent, app.WindowsInput.utf16_code_units(text))
+
+    def test_type_node_stops_when_playback_stops_mid_text(self):
+        sent = []
+
+        def capture(code_unit):
+            sent.append(code_unit)
+            self.studio.playing = False
+
+        self.studio.playing = True
+        with patch.object(app.WindowsInput, "unicode_key_tap", capture), patch.object(app.time, "sleep", lambda _seconds: None):
+            self.studio.execute_node(app.MacroNode("type", 0, 0, {"text": "abc"}))
+
+        self.assertEqual(sent, app.WindowsInput.utf16_code_units("a"))
 
     def test_paste_uses_dedicated_clipboard_shortcut(self):
         calls = []
