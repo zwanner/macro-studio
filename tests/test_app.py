@@ -726,6 +726,15 @@ class DataAndUiTests(MacroStudioTestCase):
         self.assertFalse(calls[-1]["update_scrollregion"])
 
     @unittest.skipIf(app.Image is None, "Pillow is unavailable")
+    def test_repeated_refresh_reuses_cached_sprites(self):
+        import render
+        self.studio.refresh()
+        cache_size_after_first = len(render._SPRITE_CACHE)
+        self.assertGreater(cache_size_after_first, 0)
+        self.studio.refresh()
+        self.assertEqual(len(render._SPRITE_CACHE), cache_size_after_first)
+
+    @unittest.skipIf(app.Image is None, "Pillow is unavailable")
     def test_nodes_use_antialiased_panel_images_with_text_hit_targets(self):
         self.studio.refresh()
         image_count = len(self.studio.canvas_image_refs)

@@ -43,17 +43,21 @@ from playback import PlaybackMixin
 from recorder import RecorderMixin
 from render import (
     Image,
-    ImageDraw,
     ImageTk,
     RoundedButton,
     ScrollableFrame,
     Tooltip,
     build_antialiased_icon,
+    clear_sprite_cache,
     cubic_points,
     draw_lucide_icon,
+    edge_sprite,
     hex_to_rgba,
+    port_sprite,
+    round_rect_sprite,
     rounded_rect,
     rounded_top_rect,
+    tab_sprite,
 )
 from theme import (
     NODE_DISPLAY_SCALE,
@@ -84,6 +88,7 @@ except ImportError:
 class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
     def __init__(self):
         super().__init__()
+        clear_sprite_cache()
         self.title(APP_TITLE)
         self.app_icon = None
         self.app_icon_large = None
@@ -867,26 +872,7 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
     def draw_antialiased_tab(self, x, y, w, h, radius, fill, outline, width=1):
         if Image is None:
             return rounded_top_rect(self.tab_bar, x, y, x + w, y + h, radius, fill=fill, outline=outline, width=width)
-        scale = 3
-        image_w = max(1, int(w))
-        image_h = max(1, int(h))
-        image = Image.new("RGBA", (image_w * scale, image_h * scale), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
-        fill_rgba = hex_to_rgba(fill)
-        outline_rgba = hex_to_rgba(outline)
-        r = max(1, int(radius * scale))
-        stroke = max(1, int(width * scale))
-        bbox = (0, 0, image.width - 1, image.height + r)
-        draw.rounded_rectangle(bbox, radius=r, fill=fill_rgba)
-        draw.rectangle((0, r, image.width, image.height), fill=fill_rgba)
-        draw.line((r, stroke // 2, image.width - r, stroke // 2), fill=outline_rgba, width=stroke)
-        draw.arc((0, 0, r * 2, r * 2), 180, 270, fill=outline_rgba, width=stroke)
-        draw.arc((image.width - r * 2, 0, image.width, r * 2), 270, 360, fill=outline_rgba, width=stroke)
-        draw.line((stroke // 2, r, stroke // 2, image.height), fill=outline_rgba, width=stroke)
-        draw.line((image.width - stroke // 2, r, image.width - stroke // 2, image.height), fill=outline_rgba, width=stroke)
-        draw.line((0, image.height - stroke // 2, image.width, image.height - stroke // 2), fill=outline_rgba, width=stroke)
-        image = image.resize((image_w, image_h), Image.Resampling.LANCZOS)
-        photo = ImageTk.PhotoImage(image)
+        photo = tab_sprite(w, h, radius, fill, outline, width)
         self.tab_image_refs.append(photo)
         return self.tab_bar.create_image(x, y, image=photo, anchor="nw")
 
@@ -1220,43 +1206,9 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
                 smooth=True,
             )
             return
-        points = cubic_points((x1, y1), (x1, mid_y), (x2, mid_y), (x2, y2), 32)
-        pad = max(14, width * 4)
-        min_x = min(point[0] for point in points) - pad
-        min_y = min(point[1] for point in points) - pad
-        max_x = max(point[0] for point in points) + pad
-        max_y = max(point[1] for point in points) + pad
-        scale = 3
-        image_w = max(1, int(max_x - min_x))
-        image_h = max(1, int(max_y - min_y))
-        image = Image.new("RGBA", (image_w * scale, image_h * scale), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
-        scaled_points = [((point[0] - min_x) * scale, (point[1] - min_y) * scale) for point in points]
-        draw.line(scaled_points, fill=hex_to_rgba(color), width=max(1, width * scale), joint="curve")
-        self.draw_antialiased_arrow(draw, scaled_points[-2], scaled_points[-1], color, width * scale)
-        image = image.resize((image_w, image_h), Image.Resampling.LANCZOS)
-        photo = ImageTk.PhotoImage(image)
+        photo, offset_x, offset_y = edge_sprite(x2 - x1, y2 - y1, color, width)
         self.canvas_image_refs.append(photo)
-        self.canvas.create_image(min_x, min_y, image=photo, anchor="nw")
-
-    def draw_antialiased_arrow(self, draw, previous, tip, color, width):
-        dx = tip[0] - previous[0]
-        dy = tip[1] - previous[1]
-        length = max((dx * dx + dy * dy) ** 0.5, 1)
-        ux = dx / length
-        uy = dy / length
-        px = -uy
-        py = ux
-        arrow_len = max(10, width * 3.6)
-        arrow_w = max(7, width * 2.2)
-        base_x = tip[0] - ux * arrow_len
-        base_y = tip[1] - uy * arrow_len
-        polygon = [
-            tip,
-            (base_x + px * arrow_w / 2, base_y + py * arrow_w / 2),
-            (base_x - px * arrow_w / 2, base_y - py * arrow_w / 2),
-        ]
-        draw.polygon(polygon, fill=hex_to_rgba(color))
+        self.canvas.create_image(x1 + offset_x, y1 + offset_y, image=photo, anchor="nw")
 
     def update_canvas_scrollregion(self):
         viewport_w, viewport_h = self.canvas_viewport_size()
@@ -1382,21 +1334,7 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
     def draw_antialiased_round_rect(self, x, y, w, h, radius, fill, outline="", width=1):
         if Image is None or self.fast_canvas_render:
             return rounded_rect(self.canvas, x, y, x + w, y + h, radius, fill=fill, outline=outline, width=width)
-        scale = 3
-        image_w = max(1, int(w))
-        image_h = max(1, int(h))
-        image = Image.new("RGBA", (image_w * scale, image_h * scale), (0, 0, 0, 0))
-        draw = ImageDraw.Draw(image)
-        bbox = (0, 0, image.width - 1, image.height - 1)
-        draw.rounded_rectangle(
-            bbox,
-            radius=max(1, int(radius * scale)),
-            fill=hex_to_rgba(fill) if fill else None,
-            outline=hex_to_rgba(outline) if outline else None,
-            width=max(1, int(width * scale)) if outline else 1,
-        )
-        image = image.resize((image_w, image_h), Image.Resampling.LANCZOS)
-        photo = ImageTk.PhotoImage(image)
+        photo = round_rect_sprite(w, h, radius, fill, outline, width)
         self.canvas_image_refs.append(photo)
         return self.canvas.create_image(x, y, image=photo, anchor="nw")
 
@@ -1415,16 +1353,7 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
 
     def draw_port_circle(self, center_x, center_y, radius, fill, outline, width):
         if Image is not None and not self.fast_canvas_render:
-            scale = 4
-            pad = max(width + 2, 4)
-            image_size = int((radius + pad) * 2)
-            image = Image.new("RGBA", (image_size * scale, image_size * scale), (0, 0, 0, 0))
-            draw = ImageDraw.Draw(image)
-            inset = pad * scale
-            bbox = (inset, inset, image.width - inset, image.height - inset)
-            draw.ellipse(bbox, fill=hex_to_rgba(fill), outline=hex_to_rgba(outline), width=max(1, width * scale))
-            image = image.resize((image_size, image_size), Image.Resampling.LANCZOS)
-            photo = ImageTk.PhotoImage(image)
+            photo, image_size = port_sprite(radius, fill, outline, width)
             self.canvas_image_refs.append(photo)
             self.canvas.create_image(center_x - image_size / 2, center_y - image_size / 2, image=photo, anchor="nw")
         item = self.canvas.create_oval(

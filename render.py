@@ -13,6 +13,158 @@ except ImportError:
     ImageTk = None
 
 
+# Anti-aliased sprites are expensive to build (PIL render at 3-5x scale plus
+# a LANCZOS downsample), but most are identical from frame to frame: every
+# regular node shares one body size per zoom level, every port is the same
+# circle, and auto-organized edges repeat the same geometry. Cache the
+# finished PhotoImages keyed by geometry and colors.
+_SPRITE_CACHE = {}
+_SPRITE_CACHE_MAX = 1024
+
+
+def clear_sprite_cache():
+    """Drop all cached sprites. Must be called when a new Tk root is created,
+    because PhotoImages die with the interpreter that created them."""
+    _SPRITE_CACHE.clear()
+
+
+def _cached_sprite(key, builder):
+    sprite = _SPRITE_CACHE.get(key)
+    if sprite is None:
+        if len(_SPRITE_CACHE) >= _SPRITE_CACHE_MAX:
+            _SPRITE_CACHE.clear()
+        sprite = builder()
+        _SPRITE_CACHE[key] = sprite
+    return sprite
+
+
+def round_rect_sprite(w, h, radius, fill, outline="", width=1):
+    if Image is None:
+        return None
+    image_w = max(1, int(w))
+    image_h = max(1, int(h))
+    key = ("rrect", image_w, image_h, int(radius), fill, outline, int(width))
+
+    def build():
+        scale = 3
+        image = Image.new("RGBA", (image_w * scale, image_h * scale), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        bbox = (0, 0, image.width - 1, image.height - 1)
+        draw.rounded_rectangle(
+            bbox,
+            radius=max(1, int(radius * scale)),
+            fill=hex_to_rgba(fill) if fill else None,
+            outline=hex_to_rgba(outline) if outline else None,
+            width=max(1, int(width * scale)) if outline else 1,
+        )
+        image_small = image.resize((image_w, image_h), Image.Resampling.LANCZOS)
+        return ImageTk.PhotoImage(image_small)
+
+    return _cached_sprite(key, build)
+
+
+def port_sprite(radius, fill, outline, width):
+    """Returns (photo, image_size) for a port circle."""
+    if Image is None:
+        return None, 0
+    pad = max(width + 2, 4)
+    image_size = int((radius + pad) * 2)
+    key = ("port", int(radius), pad, fill, outline, int(width))
+
+    def build():
+        scale = 4
+        image = Image.new("RGBA", (image_size * scale, image_size * scale), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        inset = pad * scale
+        bbox = (inset, inset, image.width - inset, image.height - inset)
+        draw.ellipse(bbox, fill=hex_to_rgba(fill), outline=hex_to_rgba(outline), width=max(1, width * scale))
+        image_small = image.resize((image_size, image_size), Image.Resampling.LANCZOS)
+        return ImageTk.PhotoImage(image_small)
+
+    return _cached_sprite(key, build), image_size
+
+
+def _draw_arrow_head(draw, previous, tip, color, width):
+    dx = tip[0] - previous[0]
+    dy = tip[1] - previous[1]
+    length = max((dx * dx + dy * dy) ** 0.5, 1)
+    ux = dx / length
+    uy = dy / length
+    px = -uy
+    py = ux
+    arrow_len = max(10, width * 3.6)
+    arrow_w = max(7, width * 2.2)
+    base_x = tip[0] - ux * arrow_len
+    base_y = tip[1] - uy * arrow_len
+    polygon = [
+        tip,
+        (base_x + px * arrow_w / 2, base_y + py * arrow_w / 2),
+        (base_x - px * arrow_w / 2, base_y - py * arrow_w / 2),
+    ]
+    draw.polygon(polygon, fill=hex_to_rgba(color))
+
+
+def edge_sprite(dx, dy, color, width):
+    """Returns (photo, offset_x, offset_y) for an edge curve. The curve shape
+    only depends on the start-to-end delta, so it is cached on (dx, dy)."""
+    if Image is None:
+        return None
+    dx = int(round(dx))
+    dy = int(round(dy))
+    key = ("edge", dx, dy, color, int(width))
+
+    def build():
+        mid_y = max(28, dy / 2)
+        points = cubic_points((0, 0), (0, mid_y), (dx, mid_y), (dx, dy), 32)
+        pad = max(14, width * 4)
+        min_x = min(point[0] for point in points) - pad
+        min_y = min(point[1] for point in points) - pad
+        max_x = max(point[0] for point in points) + pad
+        max_y = max(point[1] for point in points) + pad
+        scale = 3
+        image_w = max(1, int(max_x - min_x))
+        image_h = max(1, int(max_y - min_y))
+        image = Image.new("RGBA", (image_w * scale, image_h * scale), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        scaled_points = [((point[0] - min_x) * scale, (point[1] - min_y) * scale) for point in points]
+        draw.line(scaled_points, fill=hex_to_rgba(color), width=max(1, width * scale), joint="curve")
+        _draw_arrow_head(draw, scaled_points[-2], scaled_points[-1], color, width * scale)
+        image_small = image.resize((image_w, image_h), Image.Resampling.LANCZOS)
+        return ImageTk.PhotoImage(image_small), min_x, min_y
+
+    return _cached_sprite(key, build)
+
+
+def tab_sprite(w, h, radius, fill, outline, width=1):
+    if Image is None:
+        return None
+    image_w = max(1, int(w))
+    image_h = max(1, int(h))
+    key = ("tab", image_w, image_h, int(radius), fill, outline, int(width))
+
+    def build():
+        scale = 3
+        image = Image.new("RGBA", (image_w * scale, image_h * scale), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        fill_rgba = hex_to_rgba(fill)
+        outline_rgba = hex_to_rgba(outline)
+        r = max(1, int(radius * scale))
+        stroke = max(1, int(width * scale))
+        bbox = (0, 0, image.width - 1, image.height + r)
+        draw.rounded_rectangle(bbox, radius=r, fill=fill_rgba)
+        draw.rectangle((0, r, image.width, image.height), fill=fill_rgba)
+        draw.line((r, stroke // 2, image.width - r, stroke // 2), fill=outline_rgba, width=stroke)
+        draw.arc((0, 0, r * 2, r * 2), 180, 270, fill=outline_rgba, width=stroke)
+        draw.arc((image.width - r * 2, 0, image.width, r * 2), 270, 360, fill=outline_rgba, width=stroke)
+        draw.line((stroke // 2, r, stroke // 2, image.height), fill=outline_rgba, width=stroke)
+        draw.line((image.width - stroke // 2, r, image.width - stroke // 2, image.height), fill=outline_rgba, width=stroke)
+        draw.line((0, image.height - stroke // 2, image.width, image.height - stroke // 2), fill=outline_rgba, width=stroke)
+        image_small = image.resize((image_w, image_h), Image.Resampling.LANCZOS)
+        return ImageTk.PhotoImage(image_small)
+
+    return _cached_sprite(key, build)
+
+
 def hex_to_rgba(hex_color, alpha=255):
     value = hex_color.lstrip("#")
     return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16), alpha
@@ -142,6 +294,10 @@ def draw_lucide_icon(canvas, name, x, y, size, color, tags):
 def build_antialiased_icon(name, size, color):
     if Image is None:
         return None
+    return _cached_sprite(("icon", name, int(size), color), lambda: _build_icon_sprite(name, size, color))
+
+
+def _build_icon_sprite(name, size, color):
     scale = 5
     image = Image.new("RGBA", (size * scale, size * scale), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
