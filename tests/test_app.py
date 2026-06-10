@@ -11,6 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import app
+import playback
 
 
 class MacroStudioTestCase(unittest.TestCase):
@@ -460,7 +461,7 @@ class DataAndUiTests(MacroStudioTestCase):
 
     def test_save_mouse_node_stores_coordinates(self):
         self.studio.play_context = self.studio.create_play_context()
-        with patch.object(app, "get_mouse_position", lambda: (12, 34)):
+        with patch.object(playback, "get_mouse_position", lambda: (12, 34)):
             self.studio.execute_node(app.MacroNode("save_mouse", 0, 0, {"variable": "pos"}))
         self.assertEqual(self.studio.play_context["variables"]["pos_x"], 12)
         self.assertEqual(self.studio.play_context["variables"]["pos_y"], 34)
@@ -480,7 +481,7 @@ class DataAndUiTests(MacroStudioTestCase):
         self.studio.playing = True
         self.studio.play_context = self.studio.create_play_context()
 
-        with patch.object(app, "mouse", fake_mouse):
+        with patch.object(playback, "mouse", fake_mouse):
             self.studio.execute_node(
                 app.MacroNode(
                     "wait_click",
@@ -718,7 +719,7 @@ class DataAndUiTests(MacroStudioTestCase):
                 calls.append("stop")
 
         fake_keyboard = type("FakeKeyboard", (), {"Listener": FakeListener})
-        with patch.object(app, "keyboard", fake_keyboard):
+        with patch.object(playback, "keyboard", fake_keyboard):
             self.studio.playing = True
             self.studio.wait_for_hotkey("<ctrl>+x", 0.01)
 
@@ -748,7 +749,7 @@ class DataAndUiTests(MacroStudioTestCase):
                 calls.append("stop")
 
         fake_keyboard = type("FakeKeyboard", (), {"Listener": FakeListener})
-        with patch.object(app, "keyboard", fake_keyboard):
+        with patch.object(playback, "keyboard", fake_keyboard):
             self.studio.playing = True
             self.studio.wait_for_hotkey("<ctrl>+space", 1)
 
@@ -774,7 +775,7 @@ class DataAndUiTests(MacroStudioTestCase):
                 pass
 
         fake_keyboard = type("FakeKeyboard", (), {"GlobalHotKeys": FakeGlobalHotKeys})
-        with patch.object(app, "keyboard", fake_keyboard):
+        with patch.object(playback, "keyboard", fake_keyboard):
             self.studio.start_playback_stop_listener("shift+ctrl+x")
 
         self.assertEqual(list(mappings[0].keys()), ["<ctrl>+<shift>+x"])
@@ -832,7 +833,7 @@ class DataAndUiTests(MacroStudioTestCase):
                 pass
 
         fake_keyboard = type("FakeKeyboard", (), {"GlobalHotKeys": FakeGlobalHotKeys})
-        with patch.object(app, "keyboard", fake_keyboard), patch.object(self.studio, "after", lambda _delay, callback: None):
+        with patch.object(playback, "keyboard", fake_keyboard), patch.object(self.studio, "after", lambda _delay, callback: None):
             self.studio.playing = True
             self.studio.start_playback_stop_listener("shift+ctrl+x")
             mappings[0]["<ctrl>+<shift>+x"]()
