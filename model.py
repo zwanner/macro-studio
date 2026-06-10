@@ -51,7 +51,7 @@ class MacroDocument:
     def tab_title(self):
         name = self.file_path.stem if self.file_path else self.name
         marker = "*" if self.dirty else ""
-        return f"{marker}{name}  x"
+        return f"{marker}{name}"
 
 
 NODE_TYPES = {
@@ -118,6 +118,47 @@ FIELD_DESCRIPTIONS = {
     "event": "Raw recorded event data. Usually best left alone unless you are editing recorded playback manually.",
 }
 
+FIELD_LABELS = {
+    "_label": "Name",
+    "count": "Repeat count",
+    "mode": "Mode",
+    "stop_hotkey": "Stop hotkey",
+    "width": "Width",
+    "height": "Height",
+    "name": "Counter name",
+    "start": "Start value",
+    "step": "Step",
+    "seconds": "Seconds",
+    "title_contains": "Title contains",
+    "timeout": "Timeout (s)",
+    "hotkey": "Hotkey",
+    "button": "Button",
+    "x": "X",
+    "y": "Y",
+    "direction": "Direction",
+    "amount": "Amount",
+    "key": "Key",
+    "keys": "Keys",
+    "custom_keys": "Custom keys",
+    "text": "Text",
+    "variable": "Variable",
+    "target": "Save to",
+    "dataset": "Dataset",
+    "include_blank": "Include blank",
+    "save_position": "Save position",
+    "source": "Source",
+    "data": "Data rows",
+    "file_path": "File path",
+    "column": "Column",
+    "command": "Command",
+    "event": "Event data",
+}
+
+
+def field_label(key):
+    return FIELD_LABELS.get(key, str(key).replace("_", " ").strip().capitalize())
+
+
 FIELD_OPTIONS = {
     ("loop", "mode"): ["count", "until hotkey"],
     ("loop_frame", "mode"): ["count", "until hotkey"],
@@ -143,7 +184,7 @@ NODE_CATEGORIES = [
 
 
 def clean_tab_title(title):
-    return title.removeprefix("*").removesuffix("  x")
+    return title.removeprefix("*")
 
 
 def safe_int(value, fallback=0):

@@ -72,8 +72,8 @@ class PlaybackMixin:
         else:
             self._ui_drain_scheduled = False
 
-    def notify_status(self, text):
-        self._ui_call(lambda: self.status.set(text))
+    def notify_status(self, text, level=None):
+        self._ui_call(lambda: self.set_status(text, level))
 
     def notify_active_node(self, node_id):
         self._ui_call(lambda: self.highlight_active_node(node_id))
@@ -211,9 +211,12 @@ class PlaybackMixin:
                 self.execute_node_sequence(nodes, global_delay)
                 if not self.playing:
                     break
-            self.notify_status("Playback complete" if self.playing else "Playback stopped")
+            if self.playing:
+                self.notify_status("Playback complete", "success")
+            else:
+                self.notify_status("Playback stopped", "info")
         except Exception as exc:
-            self.notify_status("Playback failed")
+            self.notify_status("Playback failed", "error")
             message = str(exc)
             self._ui_call(lambda: messagebox.showerror("Playback failed", message))
         finally:

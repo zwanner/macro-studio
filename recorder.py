@@ -63,7 +63,7 @@ class RecorderMixin:
         # Recorded events arrive through after(0, ...), so queue coalescing
         # behind any node additions that are still pending.
         self.after(0, self.coalesce_recorded_keys)
-        self.status.set("Recording stopped")
+        self.set_status("Recording stopped", "info")
 
     def recorded_delay(self):
         now = time.perf_counter()
@@ -182,7 +182,7 @@ class RecorderMixin:
             merged_keys += len(run)
         self.mark_dirty()
         self.refresh()
-        self.status.set(f"Merged {merged_keys} keystrokes into Type Text")
+        self.set_status(f"Merged {merged_keys} keystrokes into Type Text", "success")
 
     def _recorded_typed_char(self, node):
         if node.node_type != "recorded":

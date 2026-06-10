@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Added middle-mouse drag panning, Shift+wheel horizontal scrolling, and Ctrl+wheel zoom that anchors to the cursor.
+- Added a subtle dot-grid canvas background for spatial reference.
+- Added a right-click context menu: node actions (duplicate, unlink, delete, connect) on nodes, and an Add Node menu that inserts at the click position on empty canvas.
+- Inspector fields now show friendly labels like "Title contains" instead of raw keys like `title_contains`.
+- Script tabs use a proper ✕ close glyph and clean titles (the dirty marker is now the only decoration).
+- Status messages now carry explicit color levels; "Stopped" and "Recording stopped" show as calm info instead of error red.
+- Fixed duplicated nodes sharing nested data with the original (editing a duplicated recorded event no longer corrupts the source node).
+- Fixed crashes when opening corrupt `.macro` files or files containing node types from a newer version; unknown nodes load as inert Notes with a warning.
+
 - Moved macro playback to a background thread so the app window stays responsive during playback and no longer freezes on long waits.
 - Reworked playback rendering: a lightweight highlight outline now tracks the active node instead of redrawing the whole canvas for every executed node.
 - Added sprite caching for anti-aliased node, port, edge, tab, and icon rendering (roughly 14x faster full-canvas refresh on mid-size graphs).

@@ -1,5 +1,6 @@
 """Macro Studio main application window: UI, graph editor, and persistence."""
 
+import copy
 import ctypes
 import json
 import queue
@@ -35,6 +36,7 @@ from model import (
     NODE_CATEGORIES,
     NODE_TYPES,
     clean_tab_title,
+    field_label,
     recorded_event_label,
     safe_float,
     safe_int,
@@ -52,6 +54,7 @@ from render import (
     cubic_points,
     draw_lucide_icon,
     edge_sprite,
+    grid_tile_sprite,
     hex_to_rgba,
     port_sprite,
     round_rect_sprite,
@@ -133,6 +136,7 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
         self._current_doc = None
         self._ui_queue = queue.Queue()
         self._ui_drain_scheduled = False
+        self._status_level = None
         self.active_node_id = None
         self.listeners = []
         self.hotkey_listener = None
@@ -475,6 +479,10 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
         self.canvas.bind("<Double-Button-1>", self.edit_selected)
         self.canvas.bind("<Control-MouseWheel>", self.on_zoom_wheel)
         self.canvas.bind("<MouseWheel>", self.on_canvas_scroll)
+        self.canvas.bind("<Shift-MouseWheel>", self.on_canvas_hscroll)
+        self.canvas.bind("<ButtonPress-2>", self.on_pan_start)
+        self.canvas.bind("<B2-Motion>", self.on_pan_move)
+        self.canvas.bind("<Button-3>", self.on_canvas_context)
 
         props = ttk.Frame(self, style="Panel.TFrame", padding=10)
         props.grid(row=2, column=2, sticky="ns")
@@ -800,10 +808,19 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
         color = THEME["error"] if "unsaved" in self.script_status.get().lower() else THEME["success"]
         self.script_status_label.configure(fg=color)
 
+    def set_status(self, text, level=None):
+        """Set status text with an explicit color level (info, success, error,
+        muted). Without a level the keyword heuristic decides the color."""
+        self._status_level = level
+        self.status.set(text)
+
     def update_status_color(self):
         if not hasattr(self, "status_label"):
             return
-        self.status_label.configure(fg=self.status_text_color(self.status.get()))
+        level = getattr(self, "_status_level", None)
+        self._status_level = None
+        color = THEME.get(level) if level else None
+        self.status_label.configure(fg=color or self.status_text_color(self.status.get()))
 
     def status_text_color(self, text):
         lowered = str(text).lower()
@@ -858,7 +875,7 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
             close_fill = THEME["panel_3"] if selected else THEME["panel"]
             close_text = THEME["error"] if close_hovered else THEME["text"]
             rounded_rect(self.tab_bar, *close_box, ui(8), fill=close_fill, outline=THEME["error"] if close_hovered else THEME["line"], tags=("tab-close",))
-            self.tab_bar.create_text(close_x, close_y - ui(1), text="x", fill=close_text, font=(UI_FONT, 10, "bold"), tags=("tab-close",))
+            self.tab_bar.create_text(close_x, close_y - ui(1), text="✕", fill=close_text, font=(UI_FONT, 9, "bold"), tags=("tab-close",))
             self.tab_hit_boxes.append(
                 {
                     "index": index,
@@ -1040,39 +1057,93 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
     def zoom_out(self):
         self.set_zoom(self.zoom / 1.15)
 
-    def set_zoom(self, value):
-        left_world = self.from_screen(self.canvas.canvasx(0)) if hasattr(self, "canvas") else 0
-        top_world = self.from_screen(self.canvas.canvasy(0)) if hasattr(self, "canvas") else 0
+    def set_zoom(self, value, anchor=None):
+        if not hasattr(self, "canvas"):
+            self.zoom = min(max(value, 0.35), 2.0)
+            return
+        anchor_x, anchor_y = anchor if anchor else (0, 0)
+        world_x = self.from_screen(self.canvas.canvasx(anchor_x))
+        world_y = self.from_screen(self.canvas.canvasy(anchor_y))
         self.zoom = min(max(value, 0.35), 2.0)
-        self.status.set(f"Editor zoom {int(self.zoom * 100)}%")
+        self.set_status(f"Editor zoom {int(self.zoom * 100)}%", "info")
         self.update_canvas_scrollregion()
-        self.restore_canvas_view(left_world, top_world)
+        # Keep the world point that was under the anchor in place.
+        self.scroll_canvas_to(self.to_screen(world_x) - anchor_x, self.to_screen(world_y) - anchor_y)
         self.refresh()
 
-    def restore_canvas_view(self, left_world, top_world):
+    def scroll_canvas_to(self, left, top):
         region = self.canvas.cget("scrollregion").split()
         if len(region) != 4:
             return
         x1, y1, x2, y2 = [float(value) for value in region]
         width = max(x2 - x1, 1)
         height = max(y2 - y1, 1)
-        self.canvas.xview_moveto(min(max(self.to_screen(left_world) / width, 0), 1))
-        self.canvas.yview_moveto(min(max(self.to_screen(top_world) / height, 0), 1))
+        self.canvas.xview_moveto(min(max(left / width, 0), 1))
+        self.canvas.yview_moveto(min(max(top / height, 0), 1))
 
     def on_zoom_wheel(self, event):
-        if event.delta > 0:
-            self.zoom_in()
-        else:
-            self.zoom_out()
+        factor = 1.15 if event.delta > 0 else 1 / 1.15
+        self.set_zoom(self.zoom * factor, anchor=(event.x, event.y))
         return "break"
 
     def on_canvas_scroll(self, event):
         self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         return "break"
 
+    def on_canvas_hscroll(self, event):
+        self.canvas.xview_scroll(int(-1 * (event.delta / 120)), "units")
+        return "break"
+
+    def on_pan_start(self, event):
+        self.canvas.scan_mark(event.x, event.y)
+        return "break"
+
+    def on_pan_move(self, event):
+        self.canvas.scan_dragto(event.x, event.y, gain=1)
+        return "break"
+
+    def on_canvas_context(self, event):
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        item = self.canvas.find_closest(canvas_x, canvas_y)
+        node = self.node_items.get(item[0]) if item else None
+        menu = self.create_styled_menu(self.canvas)
+        if node:
+            self.selected = node
+            self.refresh()
+            menu.add_command(label="Duplicate", command=self.duplicate_selected)
+            menu.add_command(label="Unlink", command=self.unlink_selected)
+            menu.add_command(label="Delete", command=self.delete_selected)
+            menu.add_separator()
+            menu.add_command(label="Connect From Here", command=self.begin_connection_from_selected)
+            menu.add_command(label="Connect To Here", command=self.connect_pending_to_selected)
+        else:
+            add_menu = self.create_styled_menu(menu)
+            world_x = int(self.from_screen(canvas_x))
+            world_y = int(self.from_screen(canvas_y))
+            for category, node_types in NODE_CATEGORIES:
+                category_menu = self.create_styled_menu(add_menu)
+                for node_type in node_types:
+                    category_menu.add_command(
+                        label=NODE_TYPES[node_type]["title"],
+                        command=lambda kind=node_type, nx=world_x, ny=world_y: self.add_node(kind, x=nx, y=ny),
+                    )
+                add_menu.add_cascade(label=category, menu=category_menu)
+            menu.add_cascade(label="Add Node", menu=add_menu)
+            menu.add_separator()
+            menu.add_command(label="Auto Organize Nodes", command=self.auto_organize_nodes)
+            menu.add_command(label="Reset Zoom", command=lambda: self.set_zoom(1.0))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
     def add_node(self, node_type, x=None, y=None, data=None):
         previous = self.selected
-        defaults = dict(NODE_TYPES[node_type]["defaults"])
+        # deepcopy: shared nested defaults (e.g. recorded "event" dicts) would
+        # otherwise be mutated across every node of the same type.
+        defaults = copy.deepcopy(NODE_TYPES[node_type]["defaults"])
         if data:
             defaults.update(data)
         self.record_history()
@@ -1123,6 +1194,7 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
             self.canvas_image_refs.clear()
             if update_scrollregion:
                 self.update_canvas_scrollregion()
+            self.draw_canvas_grid()
             ordered = sorted(self.nodes, key=lambda n: n.y)
             for node in ordered:
                 if node.node_type == "loop_frame":
@@ -1137,6 +1209,27 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
                 self.update_current_tab_title()
         finally:
             self.fast_canvas_render = previous_fast
+
+    def draw_canvas_grid(self):
+        """Tile a cached dot-grid image under the graph for spatial reference."""
+        if Image is None:
+            return
+        spacing = 44 * self.zoom
+        if spacing < 14:
+            return
+        sprite = grid_tile_sprite(spacing, "#15222b")
+        if sprite is None:
+            return
+        photo, tile_size = sprite
+        region = self.canvas.cget("scrollregion").split()
+        if len(region) != 4:
+            return
+        width = float(region[2])
+        height = float(region[3])
+        self.canvas_image_refs.append(photo)
+        for tile_x in range(0, int(width) + tile_size, tile_size):
+            for tile_y in range(0, int(height) + tile_size, tile_size):
+                self.canvas.create_image(tile_x, tile_y, image=photo, anchor="nw", tags="grid")
 
     def highlight_active_node(self, node_id=None):
         """Lightweight playback indicator: draws an accent outline around the
@@ -1583,7 +1676,7 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
             ).pack(anchor="w", pady=(0, 10))
             name_row = ttk.Frame(self.inspector_body, style="Panel.TFrame")
             name_row.pack(fill="x", pady=(0, 8))
-            name_label = ttk.Label(name_row, text="name", style="Panel.TLabel", width=10)
+            name_label = ttk.Label(name_row, text=field_label("_label"), style="Panel.TLabel", width=14)
             name_label.pack(side="left", padx=(0, 8))
             Tooltip(name_label, FIELD_DESCRIPTIONS["_label"])
             name_var = tk.StringVar(value=self.selected.title)
@@ -1597,7 +1690,7 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
                     continue
                 row = ttk.Frame(self.inspector_body, style="Panel.TFrame")
                 row.pack(fill="x", pady=5)
-                label = ttk.Label(row, text=key, style="Panel.TLabel", width=10)
+                label = ttk.Label(row, text=field_label(key), style="Panel.TLabel", width=14)
                 label.pack(side="left", padx=(0, 8))
                 field_help = self.field_description(key)
                 Tooltip(label, field_help)
@@ -1709,7 +1802,7 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
 
     def duplicate_selected(self):
         if self.selected:
-            self.add_node(self.selected.node_type, self.selected.x + 28, self.selected.y + 88, dict(self.selected.data))
+            self.add_node(self.selected.node_type, self.selected.x + 28, self.selected.y + 88, copy.deepcopy(self.selected.data))
 
     def begin_connection_from_selected(self):
         if not self.selected:
@@ -1883,22 +1976,49 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
             self.open_macro_file(Path(path))
 
     def open_macro_file(self, path):
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        nodes = [
-            MacroNode(
-                item["type"],
-                item.get("x", 80),
-                item.get("y", 80),
-                item.get("data", {}),
-                item.get("id") or item.get("node_id") or uuid.uuid4().hex[:10],
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            messagebox.showerror("Open Failed", f"Could not open {path.name}:\n\n{exc}")
+            self.status.set(f"Failed to load {path.name}")
+            return
+        if not isinstance(payload, dict):
+            messagebox.showerror("Open Failed", f"{path.name} is not a Macro Studio script file.")
+            self.status.set(f"Failed to load {path.name}")
+            return
+        nodes = []
+        unknown_types = []
+        raw_nodes = payload.get("nodes", [])
+        for item in raw_nodes if isinstance(raw_nodes, list) else []:
+            if not isinstance(item, dict):
+                continue
+            node_type = item.get("type")
+            data = item.get("data", {}) if isinstance(item.get("data"), dict) else {}
+            if node_type not in NODE_TYPES:
+                # Likely a file from a newer version. Keep the node visible as
+                # an inert Note (skipped during playback) instead of crashing.
+                unknown_types.append(str(node_type))
+                data = {
+                    "_label": f"Unknown: {node_type}",
+                    "text": f"Unsupported node type '{node_type}'. Original settings: {json.dumps(data)}",
+                }
+                node_type = "note"
+            nodes.append(
+                MacroNode(
+                    node_type,
+                    item.get("x", 80),
+                    item.get("y", 80),
+                    data,
+                    item.get("id") or item.get("node_id") or uuid.uuid4().hex[:10],
+                )
             )
-            for item in payload.get("nodes", [])
-        ]
+        raw_edges = payload.get("edges", [])
+        edges = [edge for edge in raw_edges if isinstance(edge, dict)] if isinstance(raw_edges, list) else []
         doc = MacroDocument(
             name=path.stem,
             file_path=path,
             nodes=nodes,
-            edges=payload.get("edges", []),
+            edges=edges,
         )
         if not doc.edges and len(doc.nodes) > 1:
             ordered = sorted(doc.nodes, key=lambda n: (n.y, n.x))
@@ -1906,6 +2026,13 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
         doc.selected = doc.nodes[0] if doc.nodes else None
         self.add_document(doc)
         self.add_recent_file(path)
+        if unknown_types:
+            messagebox.showwarning(
+                "Unsupported Nodes",
+                f"{path.name} contains node types this version does not support: "
+                f"{', '.join(sorted(set(unknown_types)))}.\n\n"
+                "They were converted to Note nodes and will be skipped during playback.",
+            )
         self.status.set(f"Loaded {path.name}")
 
     def write_macro(self, doc, path):
@@ -2012,7 +2139,7 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
         if self.recording:
             self.stop_recording()
         self.stop_playback_stop_listener()
-        self.status.set("Stopped")
+        self.set_status("Stopped", "info")
 
     def request_stop_all(self):
         self.playing = False

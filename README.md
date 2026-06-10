@@ -120,8 +120,16 @@ Every script starts with a Start node and an End node. Nodes are connected by ed
 
 - Drag from a node's bottom output port to another node's top input port.
 - Add a node while another node is selected to auto-connect from the selected node.
+- Right-click a node for quick actions: Duplicate, Unlink, Delete, and Connect.
+- Right-click empty canvas to add a node at that position, auto-organize, or reset zoom.
 - Use inspector actions such as Auto Link, Unlink, Duplicate, Delete, Move Up, Move Down, and Clear.
 - Use `View > Auto Organize Nodes` to lay out the current workflow.
+
+Canvas navigation:
+
+- Pan with middle-mouse drag, or scroll with the mouse wheel (`Shift` for horizontal).
+- Zoom with `Ctrl` + mouse wheel; zoom centers on the cursor.
+- A subtle dot grid keeps large workflows spatially readable.
 
 The graph supports nested visual containers through Loop Frame nodes. Nodes placed inside a Loop Frame run as that frame's body. A smaller Loop Frame inside a larger Loop Frame becomes a nested loop.
 

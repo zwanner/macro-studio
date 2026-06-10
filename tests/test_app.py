@@ -270,6 +270,48 @@ class GraphTests(MacroStudioTestCase):
 
 
 class PersistenceTests(MacroStudioTestCase):
+    def test_corrupt_macro_file_shows_error_instead_of_crashing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "broken.macro"
+            path.write_text("{not valid json", encoding="utf-8")
+            errors = []
+            doc_count = len(self.studio.documents)
+            with patch.object(app.messagebox, "showerror", lambda *args, **kwargs: errors.append(args)):
+                self.studio.open_macro_file(path)
+            self.assertEqual(len(self.studio.documents), doc_count)
+            self.assertEqual(len(errors), 1)
+
+    def test_non_dict_macro_payload_shows_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "list.macro"
+            path.write_text("[1, 2, 3]", encoding="utf-8")
+            errors = []
+            with patch.object(app.messagebox, "showerror", lambda *args, **kwargs: errors.append(args)):
+                self.studio.open_macro_file(path)
+            self.assertEqual(len(errors), 1)
+
+    def test_unknown_node_types_load_as_inert_notes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "future.macro"
+            payload = {
+                "version": 99,
+                "nodes": [
+                    {"id": "n1", "type": "start", "x": 80, "y": 80, "data": {}},
+                    {"id": "n2", "type": "teleport", "x": 80, "y": 200, "data": {"warp": 9}},
+                    {"id": "n3", "type": "end", "x": 80, "y": 320, "data": {}},
+                ],
+                "edges": [{"from": "n1", "to": "n2"}, {"from": "n2", "to": "n3"}],
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            warnings = []
+            with patch.object(app.messagebox, "showwarning", lambda *args, **kwargs: warnings.append(args)):
+                self.studio.open_macro_file(path)
+            self.assertEqual([node.node_type for node in self.studio.nodes], ["start", "note", "end"])
+            note = self.studio.nodes[1]
+            self.assertIn("teleport", note.title)
+            self.assertEqual(len(warnings), 1)
+            self.studio.refresh()  # must render without raising
+
     def test_save_and_load_preserves_node_ids_and_edges(self):
         self.studio.add_node("delay")
         self.studio.auto_link_nodes()
@@ -673,10 +715,11 @@ class DataAndUiTests(MacroStudioTestCase):
         self.assertTrue((app.ASSETS_DIR / "macro-logo.svg").exists())
         self.assertEqual(app.MACRO_FILETYPES[0], ("Macro files", "*.macro"))
 
-    def test_script_tabs_show_close_button_and_clean_title_removes_it(self):
-        title = self.studio.doc.tab_title
-        self.assertTrue(title.endswith("  x"))
-        self.assertEqual(app.clean_tab_title(title), self.studio.doc.name)
+    def test_tab_titles_are_clean_with_dirty_marker_prefix(self):
+        self.assertEqual(self.studio.doc.tab_title, self.studio.doc.name)
+        self.studio.doc.dirty = True
+        self.assertEqual(self.studio.doc.tab_title, f"*{self.studio.doc.name}")
+        self.assertEqual(app.clean_tab_title(self.studio.doc.tab_title), self.studio.doc.name)
 
     def test_clicking_tab_close_button_closes_only_that_tab(self):
         self.studio.new_macro()
@@ -1083,6 +1126,68 @@ class DataAndUiTests(MacroStudioTestCase):
             self.studio.execute_paste(data, "paste-b")
 
         self.assertEqual(pasted, ["first", "second", "first"])
+
+    def test_duplicate_node_deep_copies_nested_data(self):
+        self.studio.add_node(
+            "recorded",
+            x=100,
+            y=100,
+            data={"event": {"kind": "click", "x": 1, "y": 2, "button": "left", "delay": 0}},
+        )
+        original = self.studio.selected
+        self.studio.duplicate_selected()
+        duplicate = self.studio.selected
+        self.assertIsNot(duplicate, original)
+        duplicate.data["event"]["x"] = 999
+        self.assertEqual(original.data["event"]["x"], 1)
+
+    def test_add_node_does_not_share_nested_defaults(self):
+        self.studio.add_node("recorded")
+        first = self.studio.selected
+        self.studio.add_node("recorded")
+        second = self.studio.selected
+        first.data["event"]["kind"] = "click"
+        self.assertNotIn("kind", second.data["event"])
+
+    def test_inspector_shows_friendly_field_labels(self):
+        self.studio.add_node("wait_window")
+        self.studio.update_inspector()
+        labels = []
+        for row in self.studio.inspector_body.winfo_children():
+            for child in row.winfo_children():
+                if child.winfo_class() == "TLabel":
+                    labels.append(child.cget("text"))
+        self.assertIn("Title contains", labels)
+        self.assertIn("Timeout (s)", labels)
+        self.assertNotIn("title_contains", labels)
+
+    def test_stop_all_sets_calm_status_color(self):
+        self.studio.stop_all()
+        self.assertEqual(self.studio.status.get(), "Stopped")
+        self.assertEqual(str(self.studio.status_label.cget("foreground")), app.THEME["info"])
+
+    def test_zoom_anchors_to_cursor_position(self):
+        self.studio.update()
+        canvas = self.studio.canvas
+        anchor = (150, 120)
+        before_world = self.studio.from_screen(canvas.canvasx(anchor[0]))
+        self.studio.set_zoom(1.6, anchor=anchor)
+        after_world = self.studio.from_screen(canvas.canvasx(anchor[0]))
+        # xscrollincrement quantizes scrolling, so allow one increment of drift
+        self.assertAlmostEqual(before_world, after_world, delta=16)
+
+    def test_right_click_on_node_posts_node_context_menu(self):
+        self.studio.update()
+        self.studio.refresh()
+        start = self.node("start")
+        x = int(self.studio.to_screen(start.x + 20))
+        y = int(self.studio.to_screen(start.y + 20))
+        event = type("Event", (), {"x": x, "y": y, "x_root": 0, "y_root": 0})()
+        posted = []
+        with patch.object(app.tk.Menu, "tk_popup", lambda menu, px, py: posted.append((px, py))):
+            self.assertEqual(self.studio.on_canvas_context(event), "break")
+        self.assertEqual(self.studio.selected, start)
+        self.assertEqual(len(posted), 1)
 
     def test_undo_and_redo_restore_deleted_node(self):
         self.studio.selected = self.node("start")

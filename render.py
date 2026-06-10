@@ -135,6 +135,33 @@ def edge_sprite(dx, dy, color, width):
     return _cached_sprite(key, build)
 
 
+def grid_tile_sprite(spacing, color):
+    """Returns (photo, tile_size) for a tileable dot-grid background image.
+    Tiles target ~360px square so the canvas needs few of them at any zoom."""
+    if Image is None:
+        return None
+    spacing = max(8, int(round(spacing)))
+    dots = max(2, int(round(360 / spacing)))
+    size = spacing * dots
+    key = ("grid", spacing, color)
+
+    def build():
+        scale = 3
+        image = Image.new("RGBA", (size * scale, size * scale), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        radius = max(1, int(1.4 * scale))
+        rgba = hex_to_rgba(color)
+        for ix in range(dots):
+            for iy in range(dots):
+                cx = ix * spacing * scale + scale
+                cy = iy * spacing * scale + scale
+                draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius), fill=rgba)
+        image_small = image.resize((size, size), Image.Resampling.LANCZOS)
+        return ImageTk.PhotoImage(image_small), size
+
+    return _cached_sprite(key, build)
+
+
 def tab_sprite(w, h, radius, fill, outline, width=1):
     if Image is None:
         return None
