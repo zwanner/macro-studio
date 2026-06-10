@@ -330,6 +330,102 @@ class RecordingTests(MacroStudioTestCase):
         self.assertEqual(recorded[0].title, "Key: a")
         self.assertNotIn("pressed", recorded[0].data["event"])
 
+    def test_key_release_without_press_is_ignored(self):
+        self.studio.recording = True
+        self.studio.record_start = time.perf_counter()
+        self.studio.record_insert_after_id = self.node("start").node_id
+
+        class Key:
+            char = "r"
+
+        # Simulates releasing the record hotkey just after it started
+        # recording: the press was never captured, so no node should appear.
+        self.studio.on_record_key_release(Key())
+        self.studio.update()
+        recorded = [node for node in self.studio.nodes if node.node_type == "recorded"]
+        self.assertEqual(recorded, [])
+
+    def test_click_release_without_press_is_ignored(self):
+        self.studio.recording = True
+        self.studio.record_start = time.perf_counter()
+        self.studio.record_insert_after_id = self.node("start").node_id
+
+        class Button:
+            def __str__(self):
+                return "Button.left"
+
+        self.studio.on_record_click(10, 20, Button(), False)
+        self.studio.update()
+        recorded = [node for node in self.studio.nodes if node.node_type == "recorded"]
+        self.assertEqual(recorded, [])
+
+    def _record_typed_keys(self, text):
+        class Key:
+            def __init__(self, char):
+                self.char = char
+
+        for char in text:
+            key = Key(char)
+            self.studio.on_record_key_press(key)
+            self.studio.on_record_key_release(key)
+
+    def test_typed_keys_coalesce_into_single_type_node(self):
+        self.studio.recording = True
+        self.studio.record_start = time.perf_counter()
+        self.studio.record_insert_after_id = self.node("start").node_id
+
+        self._record_typed_keys("hello")
+        self.studio.update()
+        self.studio.stop_recording()
+        self.studio.update()
+
+        type_nodes = [node for node in self.studio.nodes if node.node_type == "type"]
+        recorded = [node for node in self.studio.nodes if node.node_type == "recorded"]
+        self.assertEqual(len(type_nodes), 1)
+        self.assertEqual(type_nodes[0].data["text"], "hello")
+        self.assertEqual(recorded, [])
+        self.assertEqual(
+            [node.node_type for node in self.studio.workflow_order()],
+            ["start", "type", "end"],
+        )
+
+    def test_short_typed_runs_are_not_coalesced(self):
+        self.studio.recording = True
+        self.studio.record_start = time.perf_counter()
+        self.studio.record_insert_after_id = self.node("start").node_id
+
+        self._record_typed_keys("hi")
+        self.studio.update()
+        self.studio.stop_recording()
+        self.studio.update()
+
+        recorded = [node for node in self.studio.nodes if node.node_type == "recorded"]
+        type_nodes = [node for node in self.studio.nodes if node.node_type == "type"]
+        self.assertEqual(len(recorded), 2)
+        self.assertEqual(type_nodes, [])
+
+    def test_coalescing_preserves_non_typed_events(self):
+        self.studio.recording = True
+        self.studio.record_start = time.perf_counter()
+        self.studio.record_insert_after_id = self.node("start").node_id
+
+        class Button:
+            def __str__(self):
+                return "Button.left"
+
+        self._record_typed_keys("abc")
+        self.studio.on_record_click(10, 20, Button(), True)
+        self.studio.on_record_click(10, 20, Button(), False)
+        self._record_typed_keys("x")
+        self.studio.update()
+        self.studio.stop_recording()
+        self.studio.update()
+
+        order = [node.node_type for node in self.studio.workflow_order()]
+        self.assertEqual(order, ["start", "type", "recorded", "recorded", "end"])
+        type_node = next(node for node in self.studio.nodes if node.node_type == "type")
+        self.assertEqual(type_node.data["text"], "abc")
+
 
 class PlaybackThreadingTests(MacroStudioTestCase):
     def test_play_macro_runs_playback_on_background_thread(self):
