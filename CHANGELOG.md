@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Added the If Window node: branch a workflow on whether the active window title matches, with green then / red else output ports and a `{window_found}` placeholder. Connected workflows now follow edges at runtime, so branches and merges work.
+- Added multi-select: box-drag on empty canvas, Ctrl+click to toggle, Ctrl+A for all. Selected groups drag together, delete in one undo step, and duplicate with their internal connections intact.
+- Recording now captures drags: press and release in different places replay as press-move-release along the captured path instead of collapsing into one click.
+- Recording now captures modifier combos: Ctrl/Alt/Win shortcuts become replayable Hotkey events (e.g. `ctrl+c`) instead of unplayable control characters, and bare modifier taps are dropped.
+
 - Added middle-mouse drag panning, Shift+wheel horizontal scrolling, and Ctrl+wheel zoom that anchors to the cursor.
 - Added a subtle dot-grid canvas background for spatial reference.
 - Added a right-click context menu: node actions (duplicate, unlink, delete, connect) on nodes, and an Add Node menu that inserts at the click position on empty canvas.

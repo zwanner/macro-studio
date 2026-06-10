@@ -8,10 +8,12 @@ The project is currently focused on Windows automation and ships as both a Pytho
 
 ## Highlights
 
-- Record mouse clicks, mouse paths, scrolls, and keyboard actions.
+- Record mouse clicks, drags, mouse paths, scrolls, keyboard actions, and hotkey combos.
 - Save and load scripts as `.macro` files.
-- Build workflows visually with Start, End, action, timing, clipboard, and loop nodes.
+- Build workflows visually with Start, End, action, timing, clipboard, loop, and condition nodes.
+- Branch workflows with If Window then/else outputs.
 - Use explicit graph connections by dragging between node ports.
+- Select many nodes at once with box-drag, Ctrl+click, or Ctrl+A, then move, delete, or duplicate them together.
 - Edit selected node settings in the inspector.
 - Work with multiple scripts through tabs.
 - Use global hotkeys for record, play, and stop.
@@ -141,6 +143,7 @@ The graph supports nested visual containers through Loop Frame nodes. Nodes plac
 - End: workflow exit point.
 - Loop Script: repeats the whole script by count or until a hotkey.
 - Loop Frame: repeats only nodes visually placed inside the frame.
+- If Window: branches on whether the active window title matches. Connect the green check port to the match path and the red cross port to the no-match path.
 - Counter: increments a named counter for use in placeholders.
 - Note: adds documentation to the graph and is ignored during playback.
 
