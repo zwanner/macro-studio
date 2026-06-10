@@ -47,6 +47,7 @@ class MacroDocument:
     nodes: list[MacroNode] = field(default_factory=list)
     edges: list[dict] = field(default_factory=list)
     selected: MacroNode | None = None
+    selected_ids: set = field(default_factory=set)
     dirty: bool = False
     undo_stack: list[dict] = field(default_factory=list)
     redo_stack: list[dict] = field(default_factory=list)

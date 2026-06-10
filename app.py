@@ -116,6 +116,7 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
         self.pending_connection_source = None
         self.connection_drag = None
         self.frame_resize = None
+        self.box_select = None
         self.drag = None
         self.drag_moved = False
         self.drag_history_snapshot = None
@@ -182,7 +183,18 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
 
     @selected.setter
     def selected(self, value):
+        # Assigning the primary selection resets multi-selection to match.
+        # Group operations that must preserve selected_ids set doc.selected
+        # directly instead.
         self.doc.selected = value
+        self.doc.selected_ids = {value.node_id} if value else set()
+
+    @property
+    def selected_ids(self):
+        return self.doc.selected_ids
+
+    def selection_nodes(self):
+        return [node for node in self.nodes if node.node_id in self.selected_ids]
 
     @property
     def file_path(self):
@@ -638,6 +650,7 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
         self.bind("<Control-n>", lambda _e: self.new_macro())
         self.bind("<Control-z>", self.undo)
         self.bind("<Control-y>", self.redo)
+        self.bind("<Control-a>", self.on_select_all)
         self.bind("<Delete>", lambda _e: self.delete_selected())
         self.bind("<space>", self.on_play_shortcut)
         self.bind("<Escape>", self.on_stop_shortcut)
@@ -728,6 +741,7 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
             ],
             "edges": json.loads(json.dumps(self.doc.edges)),
             "selected": self.selected.node_id if self.selected else None,
+            "selected_ids": sorted(self.selected_ids),
         }
 
     def push_history_snapshot(self, snapshot):
@@ -756,6 +770,10 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
         self.doc.nodes = nodes
         self.doc.edges = json.loads(json.dumps(snapshot.get("edges", [])))
         self.doc.selected = next((node for node in nodes if node.node_id == selected_id), None)
+        node_ids = {node.node_id for node in nodes}
+        self.doc.selected_ids = set(snapshot.get("selected_ids", [])) & node_ids
+        if self.doc.selected and not self.doc.selected_ids:
+            self.doc.selected_ids = {self.doc.selected.node_id}
         self.doc.dirty = True
         self.refresh()
 
@@ -1336,8 +1354,9 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
         w = self.to_screen(self.node_world_w(node))
         h = self.to_screen(self.node_world_h(node))
         active = node.node_id == self.active_node_id
-        fill = THEME["node_active"] if active else THEME["node_selected"] if node == self.selected else THEME["node"]
-        outline = THEME["node_active_outline"] if active else THEME["line_hot"] if node == self.selected else THEME["line"]
+        is_selected = node == self.selected or node.node_id in self.selected_ids
+        fill = THEME["node_active"] if active else THEME["node_selected"] if is_selected else THEME["node"]
+        outline = THEME["node_active_outline"] if active else THEME["line_hot"] if is_selected else THEME["line"]
         outline_width = 3 if active else 2
         radius = max(4, int(8 * self.zoom))
         self.draw_antialiased_round_rect(x + self.to_screen(5), y + self.to_screen(6), w, h, radius, "#04070a", "")
@@ -1360,9 +1379,10 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
         w = self.to_screen(self.node_world_w(node))
         h = self.to_screen(self.node_world_h(node))
         active = node.node_id == self.active_node_id
-        fill = "#10231f" if node != self.selected and not active else THEME["node_selected"]
-        outline = THEME["node_active_outline"] if active else THEME["accent"] if node == self.selected else THEME["line"]
-        outline_width = 3 if active or node == self.selected else 2
+        is_selected = node == self.selected or node.node_id in self.selected_ids
+        fill = "#10231f" if not is_selected and not active else THEME["node_selected"]
+        outline = THEME["node_active_outline"] if active else THEME["accent"] if is_selected else THEME["line"]
+        outline_width = 3 if active or is_selected else 2
         radius = max(5, int(10 * self.zoom))
         header_h = self.to_screen(graph_ui(40))
         self.draw_antialiased_round_rect(x + self.to_screen(5), y + self.to_screen(6), w, h, radius, "#04070a", "")
@@ -1544,9 +1564,40 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
             return
         item = self.canvas.find_closest(canvas_x, canvas_y)
         node = self.node_items.get(item[0]) if item else None
-        self.selected = node
-        self.drag = (node, self.from_screen(canvas_x) - node.x, self.from_screen(canvas_y) - node.y) if node else None
-        self.drag_history_snapshot = self.document_snapshot() if node else None
+        ctrl_held = bool(event.state & 0x0004)
+        if node is None:
+            # Empty canvas: begin a box selection (plain click clears it).
+            if not ctrl_held:
+                self.selected = None
+            self.box_select = {"x": canvas_x, "y": canvas_y, "item": None, "additive": ctrl_held}
+            self.drag = None
+            self.drag_history_snapshot = None
+            self.drag_moved = False
+            self.refresh()
+            return
+        if ctrl_held:
+            ids = set(self.selected_ids)
+            if node.node_id in ids:
+                ids.discard(node.node_id)
+                self.doc.selected = next((n for n in self.nodes if n.node_id in ids), None)
+            else:
+                ids.add(node.node_id)
+                self.doc.selected = node
+            self.doc.selected_ids = ids
+            self.drag = None
+            self.refresh()
+            return
+        if node.node_id in self.selected_ids:
+            # Clicking inside the current selection keeps the group and drags
+            # all of it together.
+            self.doc.selected = node
+        else:
+            self.selected = node
+        world_x = self.from_screen(canvas_x)
+        world_y = self.from_screen(canvas_y)
+        group = self.selection_nodes() or [node]
+        self.drag = [(member, world_x - member.x, world_y - member.y) for member in group]
+        self.drag_history_snapshot = self.document_snapshot()
         self.drag_moved = False
         self.refresh()
 
@@ -1557,16 +1608,28 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
         if self.connection_drag:
             self.update_connection_preview(event)
             return
+        if self.box_select:
+            self.update_box_select(event)
+            return
         if not self.drag:
             return
-        node, dx, dy = self.drag
         canvas_x = self.canvas.canvasx(event.x)
         canvas_y = self.canvas.canvasy(event.y)
-        new_x = max(20, self.from_screen(canvas_x) - dx)
-        new_y = max(56, self.from_screen(canvas_y) - dy)
-        self.drag_moved = self.drag_moved or node.x != new_x or node.y != new_y
-        node.x = new_x
-        node.y = new_y
+        world_x = self.from_screen(canvas_x)
+        world_y = self.from_screen(canvas_y)
+        new_positions = [(node, world_x - dx, world_y - dy) for node, dx, dy in self.drag]
+        # Clamp the whole group by a shared shift so relative layout survives
+        # hitting the canvas edge.
+        shift_x = max(0, *(20 - new_x for _, new_x, _ in new_positions), 0)
+        shift_y = max(0, *(56 - new_y for _, _, new_y in new_positions), 0)
+        moved = False
+        for node, new_x, new_y in new_positions:
+            new_x += shift_x
+            new_y += shift_y
+            moved = moved or node.x != new_x or node.y != new_y
+            node.x = new_x
+            node.y = new_y
+        self.drag_moved = self.drag_moved or moved
         self.refresh(update_inspector=False, update_status=False, update_scrollregion=False, fast=True)
 
     def on_canvas_release(self, event):
@@ -1575,6 +1638,9 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
             return
         if self.connection_drag:
             self.finish_connection_drag(event)
+            return
+        if self.box_select:
+            self.finish_box_select(event)
             return
         self.drag = None
         self.nodes.sort(key=lambda n: n.y)
@@ -1585,6 +1651,64 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
         self.drag_history_snapshot = None
         self.drag_moved = False
         self.refresh()
+
+    def update_box_select(self, event):
+        data = self.box_select
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        if data.get("item"):
+            self.canvas.delete(data["item"])
+        data["item"] = self.canvas.create_rectangle(
+            data["x"],
+            data["y"],
+            canvas_x,
+            canvas_y,
+            outline=THEME["accent"],
+            dash=(4, 3),
+            width=1,
+        )
+
+    def finish_box_select(self, event):
+        data = self.box_select
+        self.box_select = None
+        if data.get("item"):
+            self.canvas.delete(data["item"])
+        canvas_x = self.canvas.canvasx(event.x)
+        canvas_y = self.canvas.canvasy(event.y)
+        x1, x2 = sorted((data["x"], canvas_x))
+        y1, y2 = sorted((data["y"], canvas_y))
+        if x2 - x1 < 4 and y2 - y1 < 4:
+            self.refresh()
+            return
+        world_x1, world_y1 = self.from_screen(x1), self.from_screen(y1)
+        world_x2, world_y2 = self.from_screen(x2), self.from_screen(y2)
+        picked = [
+            node
+            for node in self.nodes
+            if node.x < world_x2
+            and node.x + self.node_world_w(node) > world_x1
+            and node.y < world_y2
+            and node.y + self.node_world_h(node) > world_y1
+        ]
+        ids = set(self.selected_ids) if data["additive"] else set()
+        ids |= {node.node_id for node in picked}
+        self.doc.selected_ids = ids
+        ordered = sorted(picked, key=lambda n: (n.y, n.x))
+        if ordered:
+            self.doc.selected = ordered[0]
+        elif not data["additive"]:
+            self.doc.selected = None
+        self.refresh()
+        if ids:
+            self.set_status(f"Selected {len(ids)} node{'s' if len(ids) != 1 else ''}", "info")
+
+    def on_select_all(self, event=None):
+        if event is not None and self.is_editing_text(event.widget):
+            return None
+        self.doc.selected_ids = {node.node_id for node in self.nodes}
+        self.doc.selected = self.nodes[0] if self.nodes else None
+        self.refresh()
+        return "break"
 
     def update_frame_resize(self, event):
         data = self.frame_resize
@@ -1668,6 +1792,13 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
                 style="Panel.TLabel",
                 font=(UI_FONT, 12, "bold"),
             ).pack(anchor="w", pady=(2, 10))
+            if len(self.selected_ids) > 1:
+                ttk.Label(
+                    self.inspector_body,
+                    text=f"{len(self.selected_ids)} nodes selected — actions apply to all, fields edit this node.",
+                    style="Muted.TLabel",
+                    wraplength=250,
+                ).pack(anchor="w", pady=(0, 10))
             ttk.Label(
                 self.inspector_body,
                 text=NODE_TYPES[self.selected.node_type].get("description", ""),
@@ -1806,8 +1937,34 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
                 return value
 
     def duplicate_selected(self):
+        group = [node for node in self.selection_nodes() if node.node_type not in ("start", "end")]
+        if len(group) > 1:
+            self.duplicate_group(group)
+            return
         if self.selected:
             self.add_node(self.selected.node_type, self.selected.x + 28, self.selected.y + 88, copy.deepcopy(self.selected.data))
+
+    def duplicate_group(self, group):
+        """Clone several nodes at once, preserving edges between the clones."""
+        self.record_history()
+        id_map = {}
+        clones = []
+        for node in sorted(group, key=lambda n: (n.y, n.x)):
+            clone = MacroNode(node.node_type, node.x + 28, node.y + 88, copy.deepcopy(node.data))
+            id_map[node.node_id] = clone.node_id
+            self.nodes.append(clone)
+            clones.append(clone)
+        for edge in list(self.doc.edges):
+            if edge.get("from") in id_map and edge.get("to") in id_map:
+                new_edge = {"from": id_map[edge["from"]], "to": id_map[edge["to"]]}
+                if edge.get("branch"):
+                    new_edge["branch"] = edge["branch"]
+                self.doc.edges.append(new_edge)
+        self.doc.selected_ids = {clone.node_id for clone in clones}
+        self.doc.selected = clones[0]
+        self.mark_dirty()
+        self.refresh()
+        self.set_status(f"Duplicated {len(clones)} nodes", "success")
 
     def begin_connection_from_selected(self):
         if not self.selected:
@@ -1929,13 +2086,18 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
         frame.data["height"] = round(raw_h, 1)
 
     def delete_selected(self):
-        if self.selected in self.nodes:
-            self.record_history()
-            self.remove_edges_for_node(self.selected)
-            self.nodes.remove(self.selected)
-            self.selected = None
-            self.mark_dirty()
-            self.refresh()
+        targets = self.selection_nodes()
+        if not targets and self.selected in self.nodes:
+            targets = [self.selected]
+        if not targets:
+            return
+        self.record_history()
+        for node in targets:
+            self.remove_edges_for_node(node)
+            self.nodes.remove(node)
+        self.selected = None
+        self.mark_dirty()
+        self.refresh()
 
     def move_selected(self, direction):
         if self.selected not in self.nodes:

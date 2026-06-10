@@ -952,7 +952,7 @@ class DataAndUiTests(MacroStudioTestCase):
 
     def test_drag_uses_fast_canvas_refresh(self):
         start = self.node("start")
-        self.studio.drag = (start, 0, 0)
+        self.studio.drag = [(start, 0, 0)]
         calls = []
 
         def capture_refresh(**kwargs):
@@ -1292,6 +1292,101 @@ class DataAndUiTests(MacroStudioTestCase):
             self.assertEqual(self.studio.on_canvas_context(event), "break")
         self.assertEqual(self.studio.selected, start)
         self.assertEqual(len(posted), 1)
+
+    def test_box_select_selects_enclosed_nodes(self):
+        self.studio.update()
+        self.studio.refresh()
+        start = self.node("start")
+        end = self.node("end")
+        press = type("Event", (), {"x": 700, "y": 30, "state": 0})()
+        drag = type("Event", (), {"x": 5, "y": 700, "state": 0})()
+        self.studio.on_canvas_press(press)
+        self.assertIsNotNone(self.studio.box_select)
+        self.studio.on_canvas_drag(drag)
+        self.studio.on_canvas_release(drag)
+        self.assertIn(start.node_id, self.studio.selected_ids)
+        self.assertIn(end.node_id, self.studio.selected_ids)
+        self.assertIsNone(self.studio.box_select)
+
+    def test_group_drag_moves_all_selected_nodes_together(self):
+        self.studio.update()
+        self.studio.refresh()
+        start = self.node("start")
+        end = self.node("end")
+        self.studio.doc.selected_ids = {start.node_id, end.node_id}
+        self.studio.doc.selected = start
+        start_pos = (start.x, start.y)
+        end_pos = (end.x, end.y)
+        press_x = int(self.studio.to_screen(start.x + 30))
+        press_y = int(self.studio.to_screen(start.y + 20))
+        press = type("Event", (), {"x": press_x, "y": press_y, "state": 0})()
+        move = type("Event", (), {"x": press_x + 100, "y": press_y + 60, "state": 0})()
+        self.studio.on_canvas_press(press)
+        self.assertEqual(len(self.studio.drag), 2)
+        self.studio.on_canvas_drag(move)
+        self.studio.on_canvas_release(move)
+        start_delta = (start.x - start_pos[0], start.y - start_pos[1])
+        end_delta = (end.x - end_pos[0], end.y - end_pos[1])
+        self.assertEqual(start_delta, end_delta)
+        self.assertGreater(start_delta[0], 0)
+
+    def test_ctrl_click_toggles_node_selection(self):
+        self.studio.update()
+        self.studio.refresh()
+        start = self.node("start")
+        end = self.node("end")
+        self.studio.selected = start
+        x = int(self.studio.to_screen(end.x + 30))
+        y = int(self.studio.to_screen(end.y + 20))
+        ctrl_click = type("Event", (), {"x": x, "y": y, "state": 0x0004})()
+        self.studio.on_canvas_press(ctrl_click)
+        self.assertEqual(self.studio.selected_ids, {start.node_id, end.node_id})
+        self.studio.refresh()
+        self.studio.on_canvas_press(ctrl_click)
+        self.assertEqual(self.studio.selected_ids, {start.node_id})
+
+    def test_group_delete_removes_all_selected(self):
+        self.studio.selected = self.node("start")
+        self.studio.add_node("delay")
+        self.studio.add_node("click")
+        delay = next(node for node in self.studio.nodes if node.node_type == "delay")
+        click = next(node for node in self.studio.nodes if node.node_type == "click")
+        self.studio.doc.selected_ids = {delay.node_id, click.node_id}
+        self.studio.doc.selected = delay
+        self.studio.delete_selected()
+        types = [node.node_type for node in self.studio.nodes]
+        self.assertEqual(sorted(types), ["end", "start"])
+        self.studio.undo()
+        self.assertEqual(len(self.studio.nodes), 4)
+
+    def test_group_duplicate_preserves_internal_edges(self):
+        self.studio.selected = self.node("start")
+        self.studio.add_node("delay")
+        delay = self.studio.selected
+        self.studio.add_node("click")
+        click = self.studio.selected
+        self.assertTrue(
+            any(edge["from"] == delay.node_id and edge["to"] == click.node_id for edge in self.studio.doc.edges)
+        )
+        self.studio.doc.selected_ids = {delay.node_id, click.node_id}
+        self.studio.doc.selected = delay
+        self.studio.duplicate_selected()
+        self.assertEqual(len([n for n in self.studio.nodes if n.node_type == "delay"]), 2)
+        self.assertEqual(len([n for n in self.studio.nodes if n.node_type == "click"]), 2)
+        clones = self.studio.selection_nodes()
+        self.assertEqual(len(clones), 2)
+        clone_ids = {node.node_id for node in clones}
+        internal = [
+            edge
+            for edge in self.studio.doc.edges
+            if edge["from"] in clone_ids and edge["to"] in clone_ids
+        ]
+        self.assertEqual(len(internal), 1)
+
+    def test_select_all_shortcut_selects_every_node(self):
+        self.studio.add_node("delay")
+        self.assertEqual(self.studio.on_select_all(), "break")
+        self.assertEqual(len(self.studio.selected_ids), len(self.studio.nodes))
 
     def test_undo_and_redo_restore_deleted_node(self):
         self.studio.selected = self.node("start")
