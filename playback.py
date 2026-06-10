@@ -1,9 +1,18 @@
-"""Playback engine for macro workflows, mixed into the main app window."""
+"""Playback engine for macro workflows, mixed into the main app window.
+
+Playback runs on a background daemon thread so the Tk main loop stays
+responsive. Worker code must never touch Tk directly: UI updates (status
+text, active-node highlight, dialogs, refresh) are marshaled to the main
+thread with after(), and the clipboard is accessed through the Win32 API
+helpers in winput rather than Tk's clipboard methods.
+"""
 
 import ast
 import csv
 import json
+import queue
 import subprocess
+import threading
 import time
 import tkinter as tk
 from pathlib import Path
@@ -11,7 +20,13 @@ from tkinter import messagebox
 
 from hotkeys import canonical_hotkey, display_hotkey, hotkey_token_set, normalize_hotkey_token
 from model import safe_float, safe_int
-from winput import WindowsInput, get_active_window_title, get_mouse_position
+from winput import (
+    WindowsInput,
+    get_active_window_title,
+    get_clipboard_text,
+    get_mouse_position,
+    set_clipboard_text,
+)
 
 try:
     from pynput import keyboard, mouse
@@ -23,20 +38,74 @@ except ImportError:
 class PlaybackMixin:
     """Executes the node workflow. Expects the host class to provide the
     document properties (nodes, doc, selected), graph helpers, settings,
-    status variable, and Tk plumbing (after, update, refresh)."""
+    status variable, and Tk plumbing (after, refresh, highlight_active_node)."""
 
-    def play_macro(self):
+    def _ui_call(self, callback):
+        """Queue a callback for the Tk main thread. Worker code must never
+        touch Tk directly; the queue is drained by a main-thread timer."""
+        if threading.current_thread() is threading.main_thread():
+            try:
+                callback()
+            except tk.TclError:
+                pass
+            return
+        self._ui_queue.put(callback)
+
+    def _ensure_ui_drain(self):
+        if not self._ui_drain_scheduled:
+            self._ui_drain_scheduled = True
+            self.after(33, self._drain_ui_queue)
+
+    def _drain_ui_queue(self):
+        while True:
+            try:
+                callback = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                callback()
+            except tk.TclError:
+                pass
+        thread = self.playback_thread
+        if (thread and thread.is_alive()) or not self._ui_queue.empty():
+            self.after(33, self._drain_ui_queue)
+        else:
+            self._ui_drain_scheduled = False
+
+    def notify_status(self, text):
+        self._ui_call(lambda: self.status.set(text))
+
+    def notify_active_node(self, node_id):
+        self._ui_call(lambda: self.highlight_active_node(node_id))
+
+    def play_macro(self, from_hotkey=False):
         if self.recording:
             self.stop_recording()
         if not self.nodes or self.playing:
             return
-        countdown = int(self.settings.get("playback_countdown", 3))
-        if not messagebox.askokcancel("Play Macro", f"Playback starts in {countdown} seconds. Move focus to the target window."):
+        countdown = max(0, safe_int(self.settings.get("playback_countdown", 3), 3))
+        if not from_hotkey and not messagebox.askokcancel("Play Macro", f"Playback starts in {countdown} seconds. Move focus to the target window."):
             return
         self.playing = True
         self.play_context = self.create_play_context()
+        # Pin the active document so the worker never resolves it through Tk
+        # and a mid-playback tab switch cannot change what is playing.
+        self._play_doc = self.doc
         self.status.set(f"Playing in {countdown}...")
-        self.after(100, lambda: self._play_after_countdown(countdown))
+        self.playback_thread = threading.Thread(
+            target=self._run_playback,
+            args=(countdown,),
+            name="macro-playback",
+            daemon=True,
+        )
+        self._ensure_ui_drain()
+        self.playback_thread.start()
+
+    def _run_playback(self, countdown):
+        try:
+            self._play_after_countdown(countdown)
+        finally:
+            self._play_doc = None
 
     def create_play_context(self):
         return {
@@ -120,10 +189,7 @@ class PlaybackMixin:
         return order
 
     def _play_after_countdown(self, countdown):
-        end_time = time.perf_counter() + countdown
-        while self.playing and time.perf_counter() < end_time:
-            self.update()
-            time.sleep(0.05)
+        self.wait_interruptible(countdown)
         if not self.playing:
             return
         try:
@@ -139,22 +205,23 @@ class PlaybackMixin:
                 self.play_context["loop_index"] = iteration - 1
                 self.play_context["loop_count"] = loop_count or "until stopped"
                 if loop_count is None:
-                    self.status.set(f"Playing loop {iteration}; stop with {display_hotkey(loop_settings.get('stop_hotkey', ''))}")
+                    self.notify_status(f"Playing loop {iteration}; stop with {display_hotkey(loop_settings.get('stop_hotkey', ''))}")
                 else:
-                    self.status.set(f"Playing loop {iteration} of {loop_count}")
+                    self.notify_status(f"Playing loop {iteration} of {loop_count}")
                 self.execute_node_sequence(nodes, global_delay)
                 if not self.playing:
                     break
-            self.status.set("Playback complete" if self.playing else "Playback stopped")
+            self.notify_status("Playback complete" if self.playing else "Playback stopped")
         except Exception as exc:
-            self.status.set("Playback failed")
-            messagebox.showerror("Playback failed", str(exc))
+            self.notify_status("Playback failed")
+            message = str(exc)
+            self._ui_call(lambda: messagebox.showerror("Playback failed", message))
         finally:
             self.stop_playback_stop_listener()
             self.active_node_id = None
             self.playing = False
             self.play_context = None
-            self.refresh()
+            self._ui_call(self.refresh)
 
     def execute_node_sequence(self, nodes, global_delay=0):
         for index, node in enumerate(nodes):
@@ -165,10 +232,8 @@ class PlaybackMixin:
             if not self.playing:
                 break
             self.active_node_id = node.node_id
-            self.refresh()
-            self.update()
+            self.notify_active_node(node.node_id)
             self.execute_node(node)
-            self.update()
 
     def execute_loop_frame(self, frame):
         body = self.loop_frame_body_nodes(frame)
@@ -191,9 +256,9 @@ class PlaybackMixin:
                     self.play_context["loop_index"] = iteration - 1
                     self.play_context["loop_count"] = loop_count or "until stopped"
                 if loop_count is None:
-                    self.status.set(f"{frame.title} loop {iteration}; stop with {display_hotkey(settings.get('stop_hotkey', ''))}")
+                    self.notify_status(f"{frame.title} loop {iteration}; stop with {display_hotkey(settings.get('stop_hotkey', ''))}")
                 else:
-                    self.status.set(f"{frame.title} loop {iteration} of {loop_count}")
+                    self.notify_status(f"{frame.title} loop {iteration} of {loop_count}")
                 self.execute_node_sequence(body, global_delay)
         finally:
             if self.play_context is not None:
@@ -253,9 +318,7 @@ class PlaybackMixin:
         elif kind == "paste":
             self.execute_paste(data, node.node_id)
         elif kind == "clipboard":
-            self.clipboard_clear()
-            self.clipboard_append(self.render_template(str(data.get("text", ""))))
-            self.update()
+            set_clipboard_text(self.render_template(str(data.get("text", ""))))
         elif kind == "save_clipboard":
             self.save_clipboard_text(data)
         elif kind == "launch":
@@ -273,7 +336,6 @@ class PlaybackMixin:
             title = get_active_window_title().lower()
             if needle in title:
                 return
-            self.update()
             time.sleep(0.1)
 
     def hotkey_parts(self, data):
@@ -284,7 +346,7 @@ class PlaybackMixin:
 
     def wait_for_hotkey(self, hotkey, timeout):
         if keyboard is None:
-            self.status.set("Wait Hotkey unavailable: install pynput")
+            self.notify_status("Wait Hotkey unavailable: install pynput")
             return
         target = hotkey_token_set(hotkey)
         if not target:
@@ -312,15 +374,14 @@ class PlaybackMixin:
             listener = keyboard.Listener(on_press=on_press, on_release=on_release)
             listener.start()
         except Exception as exc:
-            self.status.set(f"Wait Hotkey failed: {exc}")
+            self.notify_status(f"Wait Hotkey failed: {exc}")
             return
         end_time = None if timeout <= 0 else time.perf_counter() + timeout
-        self.status.set(f"Waiting for {display_hotkey(hotkey)}")
+        self.notify_status(f"Waiting for {display_hotkey(hotkey)}")
         try:
             while self.playing and not matched["value"]:
                 if end_time is not None and time.perf_counter() >= end_time:
                     break
-                self.update()
                 time.sleep(0.05)
         finally:
             listener.stop()
@@ -328,7 +389,7 @@ class PlaybackMixin:
     def start_playback_stop_listener(self, hotkey):
         self.stop_playback_stop_listener()
         if keyboard is None:
-            self.status.set("Loop stop hotkey unavailable: install pynput")
+            self.notify_status("Loop stop hotkey unavailable: install pynput")
             return
         hotkey = canonical_hotkey(hotkey)
         if not hotkey:
@@ -338,7 +399,7 @@ class PlaybackMixin:
             self.playback_stop_listener.start()
         except Exception as exc:
             self.playback_stop_listener = None
-            self.status.set(f"Loop stop hotkey failed: {exc}")
+            self.notify_status(f"Loop stop hotkey failed: {exc}")
 
     def stop_playback_stop_listener(self):
         if self.playback_stop_listener:
@@ -350,7 +411,7 @@ class PlaybackMixin:
 
     def wait_for_click(self, data):
         if mouse is None:
-            self.status.set("Wait Click unavailable: install pynput")
+            self.notify_status("Wait Click unavailable: install pynput")
             return
         target_button = str(data.get("button", "any")).lower()
         timeout = safe_float(data.get("timeout", 0), 0)
@@ -371,15 +432,14 @@ class PlaybackMixin:
             listener = mouse.Listener(on_click=on_click)
             listener.start()
         except Exception as exc:
-            self.status.set(f"Wait Click failed: {exc}")
+            self.notify_status(f"Wait Click failed: {exc}")
             return
         end_time = None if timeout <= 0 else time.perf_counter() + timeout
-        self.status.set("Waiting for click")
+        self.notify_status("Waiting for click")
         try:
             while self.playing and not captured:
                 if end_time is not None and time.perf_counter() >= end_time:
                     break
-                self.update()
                 time.sleep(0.03)
         finally:
             listener.stop()
@@ -387,14 +447,14 @@ class PlaybackMixin:
             self.set_play_variable(f"{variable}_x", captured["x"])
             self.set_play_variable(f"{variable}_y", captured["y"])
             self.set_play_variable(f"{variable}_button", captured["button"])
-            self.status.set(f"Saved click to {variable}_x/y")
+            self.notify_status(f"Saved click to {variable}_x/y")
 
     def save_mouse_position(self, variable):
         x, y = get_mouse_position()
         name = variable.strip() or "mouse"
         self.set_play_variable(f"{name}_x", x)
         self.set_play_variable(f"{name}_y", y)
-        self.status.set(f"Saved mouse position to {name}_x/y")
+        self.notify_status(f"Saved mouse position to {name}_x/y")
 
     def save_clipboard_text(self, data):
         if not isinstance(data, dict):
@@ -403,26 +463,23 @@ class PlaybackMixin:
         variable = str(data.get("variable", "clipboard")).strip() or "clipboard"
         dataset = str(data.get("dataset", "captured_items")).strip() or "captured_items"
         include_blank = str(data.get("include_blank", "no")).lower() == "yes"
-        try:
-            value = self.clipboard_get()
-        except tk.TclError:
-            value = ""
+        value = get_clipboard_text()
         if value == "" and not include_blank:
-            self.status.set("Skipped blank clipboard")
+            self.notify_status("Skipped blank clipboard")
             return
         if target == "dataset":
             self.append_dataset_value(dataset, value)
-            self.status.set(f"Appended clipboard to {dataset}")
+            self.notify_status(f"Appended clipboard to {dataset}")
         elif target == "file":
             path_text = self.render_template(str(data.get("file_path", ""))).strip()
             if not path_text:
-                self.status.set("Save Clipboard file path is empty")
+                self.notify_status("Save Clipboard file path is empty")
                 return
             self.append_clipboard_file(path_text, value)
-            self.status.set(f"Appended clipboard to {Path(path_text).name}")
+            self.notify_status(f"Appended clipboard to {Path(path_text).name}")
         else:
             self.set_play_variable(variable, value)
-            self.status.set(f"Saved clipboard to {variable}")
+            self.notify_status(f"Saved clipboard to {variable}")
 
     def append_dataset_value(self, name, value):
         if self.play_context is None:
@@ -454,7 +511,7 @@ class PlaybackMixin:
         step = safe_int(data.get("step", 1), 1)
         current = self.play_context["counters"].get(name, start - step)
         self.play_context["counters"][name] = current + step
-        self.status.set(f"{name}: {self.play_context['counters'][name]}")
+        self.notify_status(f"{name}: {self.play_context['counters'][name]}")
 
     def execute_paste(self, data, node_id=None):
         source = str(data.get("source", "clipboard"))
@@ -471,9 +528,7 @@ class PlaybackMixin:
         text = self.render_template(values[index])
         paste_indices[cursor_key] = paste_indices.get(cursor_key, 0) + 1
         context["paste_index"] = max(context.get("paste_index", 0), paste_indices[cursor_key])
-        self.clipboard_clear()
-        self.clipboard_append(text)
-        self.update()
+        set_clipboard_text(text)
         time.sleep(0.05)
         WindowsInput.paste_clipboard()
 
@@ -558,7 +613,7 @@ class PlaybackMixin:
     def load_paste_file(self, file_path, column):
         path = Path(file_path)
         if not path.exists():
-            self.status.set("Paste file not found")
+            self.notify_status("Paste file not found")
             return []
         delimiter = "\t" if path.suffix.lower() == ".tsv" else ","
         values = []
@@ -572,7 +627,6 @@ class PlaybackMixin:
     def wait_interruptible(self, seconds):
         end_time = time.perf_counter() + seconds
         while self.playing and time.perf_counter() < end_time:
-            self.update()
             time.sleep(0.02)
 
     def execute_recorded(self, event):

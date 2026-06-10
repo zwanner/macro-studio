@@ -1,6 +1,7 @@
 import json
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ if str(ROOT) not in sys.path:
 
 import app
 import playback
+import winput
 
 
 class MacroStudioTestCase(unittest.TestCase):
@@ -329,6 +331,49 @@ class RecordingTests(MacroStudioTestCase):
         self.assertNotIn("pressed", recorded[0].data["event"])
 
 
+class PlaybackThreadingTests(MacroStudioTestCase):
+    def test_play_macro_runs_playback_on_background_thread(self):
+        self.studio.settings["playback_countdown"] = 0
+        thread_checks = []
+
+        with patch.object(app.messagebox, "askokcancel", lambda *args, **kwargs: True), \
+            patch.object(self.studio, "execute_node", lambda node: thread_checks.append(threading.current_thread() is not threading.main_thread())):
+            self.studio.play_macro()
+            thread = self.studio.playback_thread
+            self.assertIsNotNone(thread)
+            thread.join(timeout=5)
+
+        self.assertFalse(thread.is_alive())
+        self.studio.update()
+        self.assertTrue(thread_checks)
+        self.assertTrue(all(thread_checks))
+        self.assertFalse(self.studio.playing)
+
+    def test_hotkey_play_skips_confirmation_dialog(self):
+        self.studio.settings["playback_countdown"] = 0
+        dialog_calls = []
+
+        with patch.object(app.messagebox, "askokcancel", lambda *args, **kwargs: dialog_calls.append("asked") or True):
+            self.studio.play_macro(from_hotkey=True)
+            thread = self.studio.playback_thread
+            self.assertIsNotNone(thread)
+            thread.join(timeout=5)
+
+        self.studio.update()
+        self.assertEqual(dialog_calls, [])
+        self.assertFalse(self.studio.playing)
+
+    def test_button_play_still_asks_for_confirmation(self):
+        dialog_calls = []
+
+        with patch.object(app.messagebox, "askokcancel", lambda *args, **kwargs: dialog_calls.append("asked") or False):
+            self.studio.play_macro()
+
+        self.assertEqual(dialog_calls, ["asked"])
+        self.assertIsNone(self.studio.playback_thread)
+        self.assertFalse(self.studio.playing)
+
+
 class DataAndUiTests(MacroStudioTestCase):
     def test_mouse_move_uses_direct_physical_cursor_position(self):
         calls = []
@@ -438,7 +483,9 @@ class DataAndUiTests(MacroStudioTestCase):
 
     def test_save_clipboard_node_skips_blank_values_by_default(self):
         self.studio.play_context = self.studio.create_play_context()
-        self.studio.clipboard_clear()
+        # Tk's clipboard_clear never empties the system clipboard, so blank it
+        # for real; playback reads the actual Windows clipboard.
+        winput.set_clipboard_text("")
         self.studio.execute_node(app.MacroNode("save_clipboard", 0, 0, {"target": "dataset", "dataset": "items"}))
         self.assertNotIn("items", self.studio.play_context["datasets"])
 

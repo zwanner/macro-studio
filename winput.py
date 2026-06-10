@@ -238,6 +238,29 @@ def get_mouse_position():
 
 CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
+_clipboard_api_ready = False
+
+
+def _clipboard_api():
+    """Returns (user32, kernel32) with clipboard function signatures declared.
+    Without explicit restypes, 64-bit handles get truncated to 32 bits."""
+    global _clipboard_api_ready
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    if not _clipboard_api_ready:
+        user32.OpenClipboard.argtypes = [ctypes.c_void_p]
+        user32.GetClipboardData.argtypes = [ctypes.c_uint]
+        user32.GetClipboardData.restype = ctypes.c_void_p
+        user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
+        user32.SetClipboardData.restype = ctypes.c_void_p
+        kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
+        kernel32.GlobalAlloc.restype = ctypes.c_void_p
+        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+        kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
+        _clipboard_api_ready = True
+    return user32, kernel32
 
 
 def _open_clipboard(user32, retries=10, delay=0.01):
@@ -252,17 +275,13 @@ def get_clipboard_text():
     """Read clipboard text via the Win32 API. Safe to call from any thread."""
     if not hasattr(ctypes, "windll"):
         return ""
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
+    user32, kernel32 = _clipboard_api()
     if not _open_clipboard(user32):
         return ""
     try:
         handle = user32.GetClipboardData(CF_UNICODETEXT)
         if not handle:
             return ""
-        kernel32.GlobalLock.restype = ctypes.c_void_p
-        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
-        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
         pointer = kernel32.GlobalLock(handle)
         if not pointer:
             return ""
@@ -280,21 +299,12 @@ def set_clipboard_text(text):
     """Write clipboard text via the Win32 API. Safe to call from any thread."""
     if not hasattr(ctypes, "windll"):
         return False
-    user32 = ctypes.windll.user32
-    kernel32 = ctypes.windll.kernel32
+    user32, kernel32 = _clipboard_api()
     data = str(text).encode("utf-16-le") + b"\x00\x00"
     if not _open_clipboard(user32):
         return False
     try:
         user32.EmptyClipboard()
-        kernel32.GlobalAlloc.restype = ctypes.c_void_p
-        kernel32.GlobalAlloc.argtypes = [ctypes.c_uint, ctypes.c_size_t]
-        kernel32.GlobalLock.restype = ctypes.c_void_p
-        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
-        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
-        kernel32.GlobalFree.argtypes = [ctypes.c_void_p]
-        user32.SetClipboardData.restype = ctypes.c_void_p
-        user32.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
         handle = kernel32.GlobalAlloc(GMEM_MOVEABLE, len(data))
         if not handle:
             return False

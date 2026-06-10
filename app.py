@@ -2,6 +2,8 @@
 
 import ctypes
 import json
+import queue
+import threading
 import time
 import tkinter as tk
 import uuid
@@ -121,6 +123,11 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
         self.recorded_pressed_buttons = {}
         self.record_insert_after_id = None
         self.play_context = None
+        self.playback_thread = None
+        self._play_doc = None
+        self._current_doc = None
+        self._ui_queue = queue.Queue()
+        self._ui_drain_scheduled = False
         self.active_node_id = None
         self.listeners = []
         self.hotkey_listener = None
@@ -138,8 +145,18 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
     def doc(self):
         if not self.documents:
             self.documents.append(MacroDocument())
+        if threading.current_thread() is not threading.main_thread():
+            # Worker threads must not touch Tk (self.tabs). Use the document
+            # pinned at playback start, falling back to the last one the main
+            # thread resolved.
+            for candidate in (self._play_doc, self._current_doc):
+                if candidate is not None and candidate in self.documents:
+                    return candidate
+            return self.documents[0]
         current = self.tabs.select() if hasattr(self, "tabs") else None
-        return self.tab_to_doc.get(current, self.documents[0])
+        doc = self.tab_to_doc.get(current, self.documents[0])
+        self._current_doc = doc
+        return doc
 
     @property
     def nodes(self):
@@ -659,7 +676,7 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
             self.hotkey_listener.stop()
         mapping = {
             canonical_hotkey(self.settings["record_hotkey"]): lambda: self.after(0, self.toggle_recording),
-            canonical_hotkey(self.settings["play_hotkey"]): lambda: self.after(0, self.play_macro),
+            canonical_hotkey(self.settings["play_hotkey"]): lambda: self.after(0, lambda: self.play_macro(from_hotkey=True)),
             canonical_hotkey(self.settings["stop_hotkey"]): self.request_stop_all,
         }
         try:
@@ -1134,6 +1151,33 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
                 self.update_current_tab_title()
         finally:
             self.fast_canvas_render = previous_fast
+
+    def highlight_active_node(self, node_id=None):
+        """Lightweight playback indicator: draws an accent outline around the
+        active node without re-rendering the whole canvas."""
+        if not hasattr(self, "canvas"):
+            return
+        self.canvas.delete("active-glow")
+        node = self.node_by_id(node_id) if node_id else None
+        if not node:
+            return
+        x = self.to_screen(node.x)
+        y = self.to_screen(node.y)
+        w = self.to_screen(self.node_world_w(node))
+        h = self.to_screen(self.node_world_h(node))
+        pad = max(2, int(3 * self.zoom))
+        rounded_rect(
+            self.canvas,
+            x - pad,
+            y - pad,
+            x + w + pad,
+            y + h + pad,
+            max(5, int(10 * self.zoom)),
+            outline=THEME["node_active_outline"],
+            fill="",
+            width=max(2, int(3 * self.zoom)),
+            tags="active-glow",
+        )
 
     def draw_edges(self):
         for edge in self.doc.edges:
