@@ -2177,7 +2177,7 @@ class MacroStudio(PlaybackMixin, RecorderMixin, tk.Tk):
 
     def open_macro_file(self, path):
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = json.loads(path.read_text(encoding="utf-8-sig"))
         except (OSError, json.JSONDecodeError) as exc:
             messagebox.showerror("Open Failed", f"Could not open {path.name}:\n\n{exc}")
             self.status.set(f"Failed to load {path.name}")

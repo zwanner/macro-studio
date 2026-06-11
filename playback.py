@@ -18,6 +18,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox
 
+from config import APP_DIR
 from hotkeys import canonical_hotkey, display_hotkey, hotkey_token_set, normalize_hotkey_token
 from model import safe_float, safe_int
 from winput import (
@@ -687,7 +688,7 @@ class PlaybackMixin:
         raise ValueError("Unsupported numeric expression")
 
     def load_paste_file(self, file_path, column):
-        path = Path(file_path)
+        path = self.resolve_paste_file_path(file_path)
         if not path.exists():
             self.notify_status("Paste file not found")
             return []
@@ -699,6 +700,20 @@ class PlaybackMixin:
                 if len(row) >= column and row[column - 1].strip():
                     values.append(row[column - 1].strip())
         return values
+
+    def resolve_paste_file_path(self, file_path):
+        path = Path(str(file_path)).expanduser()
+        if path.is_absolute():
+            return path
+        candidates = []
+        doc_path = getattr(self.doc, "file_path", None)
+        if doc_path:
+            candidates.append(Path(doc_path).parent / path)
+        candidates.extend([Path.cwd() / path, APP_DIR / path])
+        for candidate in candidates:
+            if candidate.exists():
+                return candidate
+        return candidates[0] if candidates else path
 
     def wait_interruptible(self, seconds):
         end_time = time.perf_counter() + seconds

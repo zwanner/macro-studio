@@ -379,6 +379,21 @@ class PersistenceTests(MacroStudioTestCase):
                 self.studio.open_macro_file(path)
             self.assertEqual(len(errors), 1)
 
+    def test_macro_file_with_utf8_bom_opens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bom.macro"
+            payload = {
+                "version": 2,
+                "nodes": [{"id": "n1", "type": "start", "x": 80, "y": 80, "data": {}}],
+                "edges": [],
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8-sig")
+            errors = []
+            with patch.object(app.messagebox, "showerror", lambda *args, **kwargs: errors.append(args)):
+                self.studio.open_macro_file(path)
+            self.assertEqual(errors, [])
+            self.assertEqual(self.studio.doc.name, "bom")
+
     def test_unknown_node_types_load_as_inert_notes(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "future.macro"
@@ -1303,6 +1318,49 @@ class DataAndUiTests(MacroStudioTestCase):
                 self.studio._play_after_countdown(0)
 
         self.assertEqual(pasted, [f"item-{index}" for index in range(1, 9)])
+
+    def test_file_paste_cursor_survives_repeated_outer_loop_frame(self):
+        start = app.MacroNode("start", 80, 80, {})
+        outer = app.MacroNode("loop_frame", 80, 180, {"width": 620, "height": 620, "mode": "until hotkey"})
+        wait = app.MacroNode("note", 150, 270, {"text": "stand-in for wait click"})
+        inner = app.MacroNode("loop_frame", 150, 380, {"width": 420, "height": 360, "count": 4})
+        end = app.MacroNode("end", 80, 900, {})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "items.csv"
+            path.write_text("\n".join(f"item-{index}" for index in range(1, 9)), encoding="utf-8")
+            paste = app.MacroNode("paste", 220, 500, {"source": "file", "file_path": str(path), "column": 1})
+            self.studio.nodes = [start, outer, wait, inner, paste, end]
+            self.studio.doc.edges = [
+                {"from": start.node_id, "to": outer.node_id},
+                {"from": outer.node_id, "to": end.node_id},
+            ]
+            pasted = []
+
+            def capture_paste():
+                pasted.append(self.studio.clipboard_get())
+                if len(pasted) == 8:
+                    self.studio.playing = False
+
+            with patch.object(app.WindowsInput, "paste_clipboard", capture_paste), \
+                patch.object(app.time, "sleep", lambda _seconds: None):
+                self.studio.playing = True
+                self.studio.play_context = self.studio.create_play_context()
+                self.studio._play_after_countdown(0)
+
+        self.assertEqual(pasted, [f"item-{index}" for index in range(1, 9)])
+
+    def test_paste_file_relative_path_resolves_from_macro_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script_dir = Path(tmp) / "scripts"
+            capture_dir = script_dir / "captures"
+            capture_dir.mkdir(parents=True)
+            path = capture_dir / "items.csv"
+            path.write_text("alpha\nbeta\n", encoding="utf-8")
+            self.studio.file_path = script_dir / "workflow.macro"
+
+            values = self.studio.load_paste_file("captures/items.csv", 1)
+
+        self.assertEqual(values, ["alpha", "beta"])
 
     def test_paste_cursors_are_tracked_per_node(self):
         self.studio.play_context = self.studio.create_play_context()

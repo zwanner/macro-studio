@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.3.0 - 2026-06-10
 
 - Added the If Window node: branch a workflow on whether the active window title matches, with green then / red else output ports and a `{window_found}` placeholder. Connected workflows now follow edges at runtime, so branches and merges work.
 - Added multi-select: box-drag on empty canvas, Ctrl+click to toggle, Ctrl+A for all. Selected groups drag together, delete in one undo step, and duplicate with their internal connections intact.
@@ -23,6 +23,8 @@
 - Recorded runs of plain typed keystrokes now merge into a single editable Type Text node after recording stops.
 - The global play hotkey no longer opens a confirmation dialog, so it no longer steals focus from the target window; the countdown still applies.
 - Playback now reads and writes the clipboard through the Win32 API, making clipboard nodes thread-safe and more reliable.
+- Paste file nodes keep advancing through repeated nested loop frames, and relative Paste file paths now resolve from the macro folder when possible.
+- Macro files with a UTF-8 BOM now open correctly.
 - Split the single-file app into focused modules (`model`, `playback`, `recorder`, `render`, `winput`, `hotkeys`, `theme`, `config`) with `app.py` as the UI layer.
 
 ## v0.2.1 - 2026-06-09

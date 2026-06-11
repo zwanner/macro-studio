@@ -42,10 +42,10 @@ Download the latest Windows release from the GitHub Releases page:
 
 [Macro Studio Releases](https://github.com/zwanner/macro-studio/releases)
 
-For v0.2.1, download:
+For v0.3.0, download:
 
 ```text
-Macro-Studio-v0.2.1-windows.zip
+Macro-Studio-v0.3.0-windows.zip
 ```
 
 Extract the zip and run:
@@ -103,7 +103,7 @@ To skip tests during a local build:
 To create a release zip manually after building:
 
 ```powershell
-Compress-Archive -Path "dist\Macro Studio" -DestinationPath "dist\Macro-Studio-v0.2.1-windows.zip" -Force
+Compress-Archive -Path "dist\Macro Studio" -DestinationPath "dist\Macro-Studio-v0.3.0-windows.zip" -Force
 ```
 
 ## Test Suite
